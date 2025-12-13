@@ -3,17 +3,15 @@ const express = require('express');
 const whatsappService = require('./services/whatsappService');
 const aiService = require('./services/aiService');
 const stockService = require('./services/stockService');
-const emailService = require('./services/emailService');
+const productExtractor = require('./services/productExtractorService');
 const Customer = require('./models/Customer');
 const connectDB = require('./config/database');
 
 const app = express();
 app.use(express.json());
 
-// Conectar a MongoDB
 connectDB();
 
-// Endpoint de verificación del webhook
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -27,7 +25,6 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// Endpoint para recibir mensajes
 app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
@@ -53,15 +50,15 @@ app.post('/webhook', async (req, res) => {
 });
 
 async function processMessage(message, value) {
+  const from = message.from;
+  
   try {
-    const from = message.from;
     const messageText = message.text?.body;
 
     if (!messageText) return;
 
     console.log(`📩 Mensaje de ${from}: ${messageText}`);
 
-    // Buscar o crear cliente
     let customer = await Customer.findOne({ phone: from });
     
     if (!customer) {
@@ -72,92 +69,84 @@ async function processMessage(message, value) {
       });
     }
 
-    // Guardar mensaje del cliente
     customer.conversations.push({
       role: 'user',
       content: messageText,
       timestamp: new Date()
     });
 
-    // Verificar stock REAL desde seguridadrosario.com
-    const stockInfo = await stockService.checkStock(messageText);
+    const productName = await productExtractor.extractProduct(messageText);
 
+    let stockInfo = null;
     let context = '';
-    if (stockInfo) {
-      if (stockInfo.disponible) {
-        // HAY STOCK
-        context = `
+
+    if (productName && productName.length > 0) {
+      console.log(`🛒 Buscando producto: "${productName}"`);
+      stockInfo = await stockService.checkStock(productName);
+
+      if (stockInfo) {
+        if (stockInfo.disponible) {
+          context = `
 PRODUCTO ENCONTRADO:
 - Nombre: ${stockInfo.nombre}
 - Código: ${stockInfo.codigo}
 - Stock disponible: ${stockInfo.stock} unidades
-- Precio: USD ${stockInfo.precio_usd} / ARS $${stockInfo.precio_ars.toLocaleString('es-AR')}
+- Precio: USD ${stockInfo.precio_usd || 'N/A'} / ARS $${stockInfo.precio_ars ? Number(stockInfo.precio_ars).toLocaleString('es-AR') : 'N/A'}
 - Marca: ${stockInfo.marca}
 - Categoría: ${stockInfo.categoria}
 ${stockInfo.descripcion ? `- Descripción: ${stockInfo.descripcion}` : ''}
 
 Informale al cliente sobre disponibilidad y precio. Preguntá si quiere presupuesto formal.
-        `;
-      } else {
-        // NO HAY STOCK - Buscar alternativas
-        const alternativas = await stockService.buscarAlternativas(
-          stockInfo.categoria,
-          stockInfo.marca
-        );
+          `;
+        } else {
+          const alternativas = await stockService.buscarAlternativas(
+            stockInfo.categoria,
+            stockInfo.marca
+          );
 
-        if (alternativas.length > 0) {
-          // HAY ALTERNATIVAS
-          context = `
+          if (alternativas && alternativas.length > 0) {
+            context = `
 PRODUCTO SIN STOCK: ${stockInfo.nombre}
 
-ALTERNATIVAS DISPONIBLES en ${stockInfo.categoria}:
+ALTERNATIVAS DISPONIBLES:
 ${alternativas.map((alt, i) => `
 ${i + 1}. ${alt.nombre}
    - Código: ${alt.codigo}
    - Marca: ${alt.marca}
    - Stock: ${alt.stock} unidades
-   - Precio: USD ${alt.precio_usd} / ARS $${alt.precio_ars.toLocaleString('es-AR')}
+   - Precio: USD ${alt.precio_usd || 'N/A'} / ARS $${alt.precio_ars ? Number(alt.precio_ars).toLocaleString('es-AR') : 'N/A'}
 `).join('\n')}
 
 Ofrece estas alternativas al cliente de forma amable.
-          `;
-        } else {
-          // NO HAY ALTERNATIVAS
-          context = `
+            `;
+          } else {
+            context = `
 PRODUCTO SIN STOCK: ${stockInfo.nombre}
-NO HAY ALTERNATIVAS DISPONIBLES en esta categoría.
+NO HAY ALTERNATIVAS DISPONIBLES.
 
 Informá al cliente que:
 1. No tenemos stock en este momento
 2. Ya consultamos con el área de Compras
 3. Lo contactaremos apenas tengamos novedades
-
-Sé empático y ofrecé ayuda con otros productos.
-          `;
-
-          // Enviar email a Compras
-          try {
-            await emailService.sendPurchaseRequestEmail(
-              stockInfo.nombre,
-              customer,
-              customer.conversations
-            );
-            console.log('📧 Email enviado a Compras');
-          } catch (emailError) {
-            console.error('❌ Error enviando email:', emailError.message);
+            `;
           }
         }
+      } else {
+        context = `
+El cliente preguntó por "${productName}" pero NO se encontró en nuestro catálogo.
+Respondé amablemente que no encontraste ese producto específico y preguntá si puede darte más detalles o si busca algo similar.
+        `;
       }
+    } else {
+      context = `
+El cliente envió un mensaje sin mencionar ningún producto específico.
+Respondé de forma cordial y preguntá en qué podés ayudarlo. Somos GRUPO SER, empresa de seguridad electrónica.
+      `;
     }
 
-    // Generar respuesta con OpenAI
-    const aiResponse = await aiService.generateResponse(
-      customer.conversations,
-      customer,
-      context
-    );
+    const conversationHistory = customer.conversations.slice(-10);
+    const aiResponse = await aiService.generateResponse(conversationHistory, customer, context);
 
-    // Guardar respuesta de Ovidio
     customer.conversations.push({
       role: 'assistant',
       content: aiResponse,
@@ -165,18 +154,16 @@ Sé empático y ofrecé ayuda con otros productos.
     });
 
     await customer.save();
-
-    // Enviar respuesta por WhatsApp
     await whatsappService.sendMessage(from, aiResponse);
 
     console.log(`✅ Respuesta enviada a ${from}`);
+
   } catch (error) {
     console.error('❌ Error procesando mensaje:', error);
     
-    // Respuesta de emergencia
     try {
       await whatsappService.sendMessage(
-        message.from,
+        from,
         'Disculpá, tuve un problema técnico. ¿Podés intentar de nuevo en un momento?'
       );
     } catch (sendError) {
@@ -186,11 +173,12 @@ Sé empático y ofrecé ayuda con otros productos.
 }
 
 app.get('/', (req, res) => {
-  res.send('🤖 Ovidio Bot - Online | Stock Real Integrado');
+  res.send('🤖 Ovidio Bot - Online | Inteligencia Activa');
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor Ovidio corriendo en puerto ${PORT}`);
   console.log(`📊 Integración con seguridadrosario.com: ACTIVA`);
+  console.log(`🧠 Extractor de productos: ACTIVO`);
 });
