@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ovidio Admin - GRUPO SER</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee; min-height: 100vh; }
+    
+    .header { background: #16213e; padding: 20px 40px; display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0f3460; }
+    .header h1 { color: #00d9ff; font-size: 24px; }
+    .header .status { color: #4ade80; font-size: 14px; }
+    
+    .container { max-width: 1400px; margin: 0 auto; padding: 30px; }
+    
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 30px; }
+    .stat-card { background: #16213e; border-radius: 12px; padding: 25px; text-align: center; border: 1px solid #0f3460; }
+    .stat-card .number { font-size: 42px; font-weight: bold; color: #00d9ff; }
+    .stat-card .label { color: #888; margin-top: 5px; }
+    .stat-card.warning .number { color: #fbbf24; }
+    .stat-card.danger .number { color: #f87171; }
+    .stat-card.success .number { color: #4ade80; }
+    
+    .section { background: #16213e; border-radius: 12px; padding: 25px; margin-bottom: 20px; border: 1px solid #0f3460; }
+    .section h2 { color: #00d9ff; margin-bottom: 20px; font-size: 18px; }
+    
+    .search-bar { display: flex; gap: 10px; margin-bottom: 20px; }
+    .search-bar input { flex: 1; padding: 12px 20px; border-radius: 8px; border: 1px solid #0f3460; background: #1a1a2e; color: #eee; font-size: 14px; }
+    .search-bar button { padding: 12px 25px; border-radius: 8px; border: none; background: #00d9ff; color: #1a1a2e; font-weight: bold; cursor: pointer; }
+    .search-bar button:hover { background: #00b8d9; }
+    
+    .client-list { display: flex; flex-direction: column; gap: 10px; }
+    .client-card { background: #1a1a2e; border-radius: 8px; padding: 20px; display: grid; grid-template-columns: 2fr 2fr 1fr 1fr; gap: 15px; align-items: center; border: 1px solid #0f3460; transition: all 0.2s; }
+    .client-card:hover { border-color: #00d9ff; transform: translateX(5px); }
+    .client-name { font-weight: bold; color: #fff; }
+    .client-info { color: #888; font-size: 13px; }
+    .client-status { padding: 5px 12px; border-radius: 20px; font-size: 12px; text-align: center; }
+    .status-nuevo { background: #00d9ff22; color: #00d9ff; }
+    .status-cotizado { background: #fbbf2422; color: #fbbf24; }
+    .status-cerrado { background: #4ade8022; color: #4ade80; }
+    .client-action { text-align: right; }
+    .client-action button { padding: 8px 15px; border-radius: 6px; border: none; background: #0f3460; color: #00d9ff; cursor: pointer; }
+    
+    .loading { text-align: center; padding: 40px; color: #888; }
+    .empty { text-align: center; padding: 40px; color: #666; }
+    
+    @media (max-width: 768px) {
+      .stats { grid-template-columns: repeat(2, 1fr); }
+      .client-card { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🤖 OVIDIO ADMIN</h1>
+    <div class="status">● Sistema Online</div>
+  </div>
+  
+  <div class="container">
+    <div class="stats">
+      <div class="stat-card">
+        <div class="number" id="totalClientes">-</div>
+        <div class="label">Clientes Totales</div>
+      </div>
+      <div class="stat-card success">
+        <div class="number" id="clientesHoy">-</div>
+        <div class="label">Nuevos Hoy</div>
+      </div>
+      <div class="stat-card warning">
+        <div class="number" id="conPedidos">-</div>
+        <div class="label">Con Pedidos</div>
+      </div>
+      <div class="stat-card danger">
+        <div class="number" id="pendientes">-</div>
+        <div class="label">Pendientes</div>
+      </div>
+    </div>
+    
+    <div class="section">
+      <h2>🔥 Últimos Clientes</h2>
+      <div class="search-bar">
+        <input type="text" id="busqueda" placeholder="Buscar por nombre, CUIT o teléfono...">
+        <button onclick="buscar()">Buscar</button>
+      </div>
+      <div class="client-list" id="clientesList">
+        <div class="loading">Cargando clientes...</div>
+      </div>
+    </div>
+  </div>
+  
+  <script>
+    const API = '/admin/api';
+    
+    async function cargarStats() {
+      try {
+        const res = await fetch(`${API}/stats`);
+        const data = await res.json();
+        if (data.success) {
+          document.getElementById('totalClientes').textContent = data.stats.totalClientes;
+          document.getElementById('clientesHoy').textContent = data.stats.clientesHoy;
+          document.getElementById('conPedidos').textContent = data.stats.conPedidos;
+          document.getElementById('pendientes').textContent = data.stats.pendientes;
+        }
+      } catch (e) {
+        console.error('Error cargando stats:', e);
+      }
+    }
+    
+    async function cargarClientes() {
+      try {
+        const res = await fetch(`${API}/clientes`);
+        const data = await res.json();
+        
+        const lista = document.getElementById('clientesList');
+        
+        if (!data.success || data.clientes.length === 0) {
+          lista.innerHTML = '<div class="empty">No hay clientes registrados</div>';
+          return;
+        }
+        
+        lista.innerHTML = data.clientes.map(c => `
+          <div class="client-card">
+            <div>
+              <div class="client-name">${c.nombre}</div>
+              <div class="client-info">📱 ${c.phone}</div>
+            </div>
+            <div>
+              <div class="client-info">🏢 CUIT: ${c.cuit || 'Sin CUIT'}</div>
+              <div class="client-info">💼 ${c.rubro || 'Sin rubro'}</div>
+            </div>
+            <div>
+              <span class="client-status status-${c.estado}">${c.estado}</span>
+            </div>
+            <div class="client-action">
+              <button onclick="verDetalle('${c.id}')">Ver más</button>
+            </div>
+          </div>
+        `).join('');
+        
+      } catch (e) {
+        console.error('Error cargando clientes:', e);
+        document.getElementById('clientesList').innerHTML = '<div class="empty">Error al cargar</div>';
+      }
+    }
+    
+    async function buscar() {
+      const q = document.getElementById('busqueda').value;
+      if (!q) {
+        cargarClientes();
+        return;
+      }
+      
+      try {
+        const res = await fetch(`${API}/buscar?q=${encodeURIComponent(q)}`);
+        const data = await res.json();
+        
+        const lista = document.getElementById('clientesList');
+        
+        if (!data.success || data.clientes.length === 0) {
+          lista.innerHTML = '<div class="empty">Sin resultados</div>';
+          return;
+        }
+        
+        lista.innerHTML = data.clientes.map(c => `
+          <div class="client-card">
+            <div>
+              <div class="client-name">${c.razonSocial || c.name || c.phone}</div>
+              <div class="client-info">📱 ${c.phone}</div>
+            </div>
+            <div>
+              <div class="client-info">🏢 CUIT: ${c.cuit || 'Sin CUIT'}</div>
+            </div>
+            <div><span class="client-status status-${c.estado || 'nuevo'}">${c.estado || 'nuevo'}</span></div>
+            <div class="client-action"><button onclick="verDetalle('${c._id}')">Ver</button></div>
+          </div>
+        `).join('');
+        
+      } catch (e) {
+        console.error('Error buscando:', e);
+      }
+    }
+    
+    function verDetalle(id) {
+      alert('Función en desarrollo - ID: ' + id);
+    }
+    
+    // Cargar al inicio
+    cargarStats();
+    cargarClientes();
+    
+    // Refrescar cada 30 segundos
+    setInterval(() => {
+      cargarStats();
+      cargarClientes();
+    }, 30000);
+  </script>
+</body>
+</html>
+
+
+
+
+

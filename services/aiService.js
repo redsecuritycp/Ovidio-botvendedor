@@ -1,86 +1,109 @@
 const axios = require('axios');
 
-async function generateResponse(conversationHistory, customer, stockContext = '') {
-  try {
-    const systemPrompt = `Sos Ovidio, el asistente virtual de GRUPO SER (empresa de seguridad electrónica en Argentina).
+async function generateResponse(userMessage, conversationHistory, stockContext, customer) {
+  const maxRetries = 3;
+  let lastError = null;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const systemPrompt = `Sos OVIDIO, asesor comercial EXPERTO de GRUPO SER, seguridad electrónica en Rosario.
 
-PERSONALIDAD:
-- Cordial, profesional, empático
-- Disponible 24/7
-- Hablás en argentino (vos, che, dale)
-- Sé breve y directo, sin ser seco
+PERSONALIDAD: Vendedor profesional, conocimiento técnico profundo, cordial pero CONCRETO, español rioplatense SIN "che".
+
+CONOCIMIENTO TÉCNICO:
+- CÁMARAS: 2MP=1080p, 4MP=2K, 8MP=4K. Bullet=exterior, Domo=interior. ColorVu=color de noche. Hikvision=premium, Dahua=calidad/precio.
+- DVR/NVR: DVR=analógicas (coaxial), NVR=IP (red). XVR=híbrido. 1TB=7 días con 4 cámaras 2MP.
+- DISCOS: WD Purple=videovigilancia, SSD=más rápido pero más caro.
+- ALARMAS: Ajax=inalámbrica premium, DSC=cableada confiable.
 
 FLUJO DE VENTA:
+1. Entendé la necesidad del cliente
+2. Recomendá productos específicos con precios y stock
+3. Cuando pida presupuesto, pedí: CUIT, Razón Social, Forma de pago
+4. Armá presupuestos detallados con totales
 
-1. CONSULTA DE PRODUCTOS:
-   - Si HAY STOCK: Informá disponibilidad, precio en USD y ARS, y preguntá si quiere presupuesto formal
-   - Si NO HAY STOCK pero hay alternativas: Ofrecé las opciones disponibles
-   - Si NO HAY STOCK ni alternativas: Informá que consultaste con Compras y lo mantendrás al tanto
+DATOS DEL CLIENTE (YA GUARDADOS):
+Nombre: ${customer?.name || 'Cliente'}
+Teléfono: ${customer?.phone || ''}
+CUIT: ${customer?.cuit || 'No proporcionado'}
+Razón Social: ${customer?.razonSocial || 'No proporcionada'}
+Forma de pago: ${customer?.formaPago || 'No especificada'}
+Rubro: ${customer?.rubro || ''}
+Ubicación: ${customer?.ubicacion || ''}
+Email: ${customer?.email || ''}
+Marcas preferidas: ${customer?.marcasPreferidas || ''}
 
-2. ARMADO DE PRESUPUESTO:
-   Si el cliente quiere presupuesto, solicitá amablemente:
-   - CUIT
-   - Razón Social
-   - Rubro de la empresa
-   - Ubicación/Dirección
-   - Método de pago preferido (transferencia, efectivo, tarjeta)
+Si el cliente YA proporcionó CUIT/Razón Social/Forma de pago, NO los vuelvas a pedir. Usá los datos guardados.
 
-3. REGLAS DE ORO:
-   - NUNCA inventes stock o precios
-   - NUNCA prometas fechas de entrega sin consultar
-   - Si no tenés la info, admitilo y ofrecé consultarlo
+STOCK DISPONIBLE:
+${stockContext || 'Consultá stock cuando el cliente pida productos específicos.'}
 
-IMPORTANTE:
-- Los precios ya incluyen IVA
-- Stock actualizado en tiempo real
-- Horario de atención física: Lunes a Viernes 08:00-17:00hs
+REGLAS:
+- Precios incluyen IVA
+- Horario: Lun-Vie 8-17hs
+- NUNCA repitas preguntas que ya hiciste
+- Si el cliente ya dio datos, confirmalos y seguí adelante`;
 
-DATOS DEL CLIENTE ACTUAL:
-Nombre: ${customer.name || 'Cliente nuevo'}
-Teléfono: ${customer.phone}
-${customer.cuit ? `CUIT: ${customer.cuit}` : ''}
-${customer.razonSocial ? `Razón Social: ${customer.razonSocial}` : ''}
-${customer.rubro ? `Rubro: ${customer.rubro}` : ''}
-${customer.location ? `Ubicación: ${customer.location}` : ''}
+      const messages = [{ role: 'system', content: systemPrompt }];
 
-${stockContext ? `\n═══════════════════════════════════════\nCONTEXTO DE STOCK (INFORMACIÓN ACTUALIZADA):\n${stockContext}\n═══════════════════════════════════════` : ''}
-`;
-
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      ...conversationHistory.slice(-10).map(msg => ({
-        role: msg.role,
-        content: msg.content
-      }))
-    ];
-
-    const response = await axios.post(
-      'https://api.openai.com/v1/chat/completions',
-      {
-        model: 'gpt-4',
-        messages: messages,
-        temperature: 0.7,
-        max_tokens: 500
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 30000
+      // Historial reciente (últimos 8 mensajes para tener contexto pero no sobrecargar)
+      if (conversationHistory && conversationHistory.length > 0) {
+        const recentHistory = conversationHistory.slice(-8);
+        for (const msg of recentHistory) {
+          messages.push({
+            role: msg.role === 'user' ? 'user' : 'assistant',
+            content: msg.content
+          });
+        }
       }
-    );
 
-    return response.data.choices[0].message.content;
-  } catch (error) {
-    console.error('❌ Error en OpenAI:', error.message);
-    
-    if (error.response) {
-      console.error('Detalles:', error.response.data);
+      messages.push({ role: 'user', content: userMessage });
+
+      console.log(`🤖 Llamando a OpenAI (intento ${attempt}/${maxRetries})...`);
+      const startTime = Date.now();
+
+      const response = await axios.post(
+        'https://api.openai.com/v1/chat/completions',
+        {
+          model: 'gpt-4',
+          messages: messages,
+          temperature: 0.7,
+          max_tokens: 1000
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 120000  // 2 minutos de timeout
+        }
+      );
+
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log(`✅ OpenAI respondió en ${elapsed}s`);
+
+      return response.data.choices[0].message.content;
+
+    } catch (error) {
+      lastError = error;
+      console.error(`❌ Intento ${attempt}/${maxRetries} falló:`, error.message);
+      
+      if (attempt < maxRetries) {
+        const waitTime = attempt * 3000; // 3s, 6s, 9s
+        console.log(`🔄 Reintentando en ${waitTime/1000}s...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
     }
-    
-    return 'Disculpá, tuve un problema técnico. ¿Podés repetir tu consulta en un momento?';
   }
+  
+  console.error('❌ Todos los intentos fallaron:', lastError?.message);
+  
+  // Mensaje de error más útil
+  if (lastError?.message?.includes('timeout')) {
+    return 'Estoy procesando tu pedido que es bastante completo. Dame unos segundos más y volvé a escribirme "continuar" para que te pase el presupuesto.';
+  }
+  
+  return 'Disculpá, tuve un problema técnico. ¿Podés repetirme tu consulta?';
 }
 
 module.exports = { generateResponse };

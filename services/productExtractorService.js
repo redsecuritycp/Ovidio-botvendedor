@@ -1,7 +1,16 @@
 const axios = require('axios');
 
-async function extractProduct(messageText) {
+async function extractProduct(messageText, conversationHistory = []) {
   try {
+    // Construir contexto de la conversación
+    let conversationContext = '';
+    if (conversationHistory.length > 0) {
+      const lastMessages = conversationHistory.slice(-6);
+      conversationContext = lastMessages.map(msg => 
+        `${msg.role === 'user' ? 'Cliente' : 'Ovidio'}: ${msg.content}`
+      ).join('\n');
+    }
+
     const response = await axios.post(
       'https://api.openai.com/v1/chat/completions',
       {
@@ -9,21 +18,21 @@ async function extractProduct(messageText) {
         messages: [
           {
             role: 'system',
-            content: `Sos un asistente que extrae nombres de productos de mensajes de clientes de una empresa de seguridad electrónica.
+            content: `Extraés términos de búsqueda de productos de seguridad electrónica.
+
+CONTEXTO DE LA CONVERSACIÓN:
+${conversationContext || '(Primera interacción)'}
 
 REGLAS:
-- Extraé SOLO el nombre del producto (sin saludos, sin "necesito", sin verbos)
-- Ejemplos:
-  * "Hola, necesito una cámara IP" → "cámara IP"
-  * "che querría una alarma Ajax" → "alarma Ajax"
-  * "disco duro 2TB" → "disco duro 2TB"
-  * "tienen DVR Hikvision?" → "DVR Hikvision"
-  * "hola" → ""
-  * "buenos días" → ""
-  * "gracias" → ""
-  * "ok perfecto" → ""
-- Si NO hay producto en el mensaje, respondé con string vacío ""
-- Respondé SOLO con el nombre del producto, nada más`
+1. Si mencionan producto directo: "cámara IP" → "cámara IP"
+2. Si dan características después de que Ovidio preguntó:
+   - "exterior, 2mp, dahua" (hablaban de cámaras) → "cámara dahua 2mp"
+   - "4 canales, hikvision" (hablaban de DVR) → "dvr hikvision 4"
+3. SIEMPRE incluí marca si la mencionan
+4. SIEMPRE incluí características técnicas (2mp, 4mp, exterior, etc)
+5. Saludos sin producto → ""
+
+Respondé SOLO con los términos de búsqueda.`
           },
           {
             role: 'user',
@@ -31,7 +40,7 @@ REGLAS:
           }
         ],
         temperature: 0.3,
-        max_tokens: 50
+        max_tokens: 100
       },
       {
         headers: {
@@ -44,10 +53,12 @@ REGLAS:
 
     let extractedProduct = response.data.choices[0].message.content.trim();
     
-    // Limpiar si GPT devuelve "" literalmente
-    if (extractedProduct === '""' || extractedProduct === "''") {
+    // Limpiar respuestas vacías
+    if (extractedProduct === '""' || extractedProduct === "''" || 
+        extractedProduct === '(ninguno)' || extractedProduct === 'ninguno') {
       extractedProduct = '';
     }
+    extractedProduct = extractedProduct.replace(/^["']|["']$/g, '');
     
     console.log(`🔍 Mensaje original: "${messageText}"`);
     console.log(`📦 Producto extraído: "${extractedProduct}"`);
