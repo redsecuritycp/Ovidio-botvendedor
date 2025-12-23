@@ -60,17 +60,10 @@ const customerSchema = new mongoose.Schema({
   
   // Métricas
   totalCompras: { type: Number, default: 0 },
-  ultimoContacto: { type: Date, default: Date.now },
-  
-  // Timestamps automáticos
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
-});
-
-// Actualizar updatedAt en cada save
-customerSchema.pre('save', function(next) {
-  this.updatedAt = new Date();
-  next();
+  ultimoContacto: { type: Date, default: Date.now }
+}, {
+  // Mongoose maneja automáticamente createdAt y updatedAt
+  timestamps: true
 });
 
 module.exports = mongoose.model('Customer', customerSchema);
