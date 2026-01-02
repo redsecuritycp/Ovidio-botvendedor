@@ -1,21 +1,12 @@
-entrypoint = "index.js"
-modules = ["nodejs-22"]
-hidden = [".config", "package-lock.json"]
-
-[gitHubImport]
-requiredFiles = [".replit", "replit.nix", "package.json", "package-lock.json"]
+entrypoint = "main.py"
+modules = ["python-3.11"]
 
 [nix]
-channel = "stable-24_11"
-packages = ["try"]
+channel = "stable-24_05"
 
 [deployment]
-run = ["node", "index.js"]
+run = ["python", "main.py"]
 deploymentTarget = "autoscale"
-ignorePorts = false
-
-[agent]
-expertMode = true
 
 [[ports]]
 localPort = 3000
