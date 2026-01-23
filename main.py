@@ -1,17 +1,17 @@
 import os
 from flask import Flask, request, jsonify, send_from_directory
-from pymongo import MongoClient
-from datetime import datetime
-from openai import OpenAI
+from pymongo import MongoClient, ASCENDING
+from datetime import datetime, timedelta
 import requests
 import json
-import re
+from openai import OpenAI
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.units import mm
 import uuid
+import glob
 
 app = Flask(__name__)
 
@@ -24,11 +24,46 @@ PRESUPUESTOS_DIR = os.path.join(os.path.dirname(__file__), 'presupuestos')
 if not os.path.exists(PRESUPUESTOS_DIR):
     os.makedirs(PRESUPUESTOS_DIR)
 
+DIAS_EXPIRACION = 15
+
+def limpiar_pdfs_viejos():
+    """Elimina PDFs con más de 15 días de antigüedad"""
+    try:
+        ahora = datetime.now()
+        archivos = glob.glob(os.path.join(PRESUPUESTOS_DIR, '*.pdf'))
+        eliminados = 0
+        
+        for archivo in archivos:
+            fecha_creacion = datetime.fromtimestamp(os.path.getctime(archivo))
+            dias_antiguedad = (ahora - fecha_creacion).days
+            
+            if dias_antiguedad > DIAS_EXPIRACION:
+                os.remove(archivo)
+                eliminados += 1
+                print(f'🗑️ PDF eliminado por antigüedad: {archivo}')
+        
+        if eliminados > 0:
+            print(f'🧹 Limpieza: {eliminados} PDFs eliminados')
+    except Exception as e:
+        print(f'❌ Error limpiando PDFs: {e}')
+
 def conectar_mongodb():
     global cliente_mongo, db
     try:
         cliente_mongo = MongoClient(os.environ.get('MONGODB_URI'))
         db = cliente_mongo['ovidio_db']
+        
+        # Crear índice TTL para presupuestos (expiran a los 15 días)
+        try:
+            db['presupuestos'].create_index(
+                'creado',
+                expireAfterSeconds=DIAS_EXPIRACION * 24 * 60 * 60
+            )
+            print(f'✅ Índice TTL configurado: {DIAS_EXPIRACION} días')
+        except Exception as e:
+            # El índice ya existe
+            print(f'ℹ️ Índice TTL ya existe')
+        
         print('✅ MongoDB conectado')
         return db
     except Exception as e:
@@ -109,6 +144,12 @@ def crear_presupuesto(telefono, nombre_cliente, items, validez_dias=15):
         
         presupuestos = db['presupuestos']
         
+        # Cancelar presupuestos pendientes anteriores del mismo cliente
+        presupuestos.update_many(
+            {'telefono': telefono, 'estado': 'pendiente_confirmacion'},
+            {'$set': {'estado': 'cancelado', 'actualizado': datetime.utcnow()}}
+        )
+        
         # Generar número de presupuesto
         ultimo = presupuestos.find_one(sort=[('numero', -1)])
         numero = (ultimo.get('numero', 0) + 1) if ultimo else 1
@@ -116,7 +157,7 @@ def crear_presupuesto(telefono, nombre_cliente, items, validez_dias=15):
         # Calcular totales
         subtotal = sum(item['precio'] * item['cantidad'] for item in items)
         
-        # Calcular IVA por item (puede variar entre 10.5% y 21%)
+        # Calcular IVA por item
         total_iva = 0
         for item in items:
             iva_porcentaje = item.get('iva', 21)
@@ -172,19 +213,15 @@ def formatear_presupuesto_texto(presupuesto):
     lineas.append(f"*Subtotal:* ${presupuesto['subtotal']:,.0f}")
     lineas.append(f"*IVA:* ${presupuesto['iva']:,.0f}")
     lineas.append(f"*TOTAL:* ${presupuesto['total']:,.0f}")
-    lineas.append("")
-    lineas.append("_Precios expresados sin IVA. El IVA puede ser 10.5% o 21% según el producto._")
     
     return "\n".join(lineas)
 
 def generar_pdf_presupuesto(presupuesto):
     """Genera el PDF del presupuesto y devuelve la URL"""
     try:
-        # Nombre único para el archivo
         nombre_archivo = f"presupuesto_{presupuesto['numero']}_{uuid.uuid4().hex[:8]}.pdf"
         ruta_archivo = os.path.join(PRESUPUESTOS_DIR, nombre_archivo)
         
-        # Crear el PDF
         doc = SimpleDocTemplate(ruta_archivo, pagesize=A4,
                                 rightMargin=20*mm, leftMargin=20*mm,
                                 topMargin=20*mm, bottomMargin=20*mm)
@@ -192,13 +229,12 @@ def generar_pdf_presupuesto(presupuesto):
         elementos = []
         estilos = getSampleStyleSheet()
         
-        # Estilo personalizado para título
         estilo_titulo = ParagraphStyle(
             'Titulo',
             parent=estilos['Heading1'],
             fontSize=18,
             spaceAfter=30,
-            alignment=1  # Centrado
+            alignment=1
         )
         
         estilo_subtitulo = ParagraphStyle(
@@ -208,26 +244,23 @@ def generar_pdf_presupuesto(presupuesto):
             spaceAfter=20
         )
         
-        # Encabezado
         elementos.append(Paragraph("GRUPO SER", estilo_titulo))
         elementos.append(Paragraph("Seguridad Electrónica", estilos['Normal']))
         elementos.append(Spacer(1, 20))
         
-        # Datos del presupuesto
         elementos.append(Paragraph(f"<b>PRESUPUESTO N° {presupuesto['numero']}</b>", estilo_subtitulo))
         elementos.append(Paragraph(f"Fecha: {presupuesto['creado'].strftime('%d/%m/%Y')}", estilos['Normal']))
         elementos.append(Paragraph(f"Cliente: {presupuesto['nombre_cliente']}", estilos['Normal']))
         elementos.append(Paragraph(f"Válido por: {presupuesto['validez_dias']} días", estilos['Normal']))
         elementos.append(Spacer(1, 20))
         
-        # Tabla de items
         datos_tabla = [['Producto', 'Cant.', 'Precio Unit.', 'IVA', 'Subtotal']]
         
         for item in presupuesto['items']:
             iva_porcentaje = item.get('iva', 21)
             subtotal_item = item['precio'] * item['cantidad']
             datos_tabla.append([
-                item['nombre'],
+                item['nombre'][:40],
                 str(item['cantidad']),
                 f"${item['precio']:,.0f}",
                 f"{iva_porcentaje}%",
@@ -253,46 +286,23 @@ def generar_pdf_presupuesto(presupuesto):
         elementos.append(tabla)
         elementos.append(Spacer(1, 20))
         
-        # Totales
-        estilo_total = ParagraphStyle(
-            'Total',
-            parent=estilos['Normal'],
-            fontSize=11,
-            alignment=2  # Derecha
-        )
-        
+        estilo_total = ParagraphStyle('Total', parent=estilos['Normal'], fontSize=11, alignment=2)
         elementos.append(Paragraph(f"Subtotal: ${presupuesto['subtotal']:,.0f}", estilo_total))
         elementos.append(Paragraph(f"IVA: ${presupuesto['iva']:,.0f}", estilo_total))
         elementos.append(Spacer(1, 10))
         
-        estilo_total_final = ParagraphStyle(
-            'TotalFinal',
-            parent=estilos['Normal'],
-            fontSize=14,
-            fontName='Helvetica-Bold',
-            alignment=2
-        )
+        estilo_total_final = ParagraphStyle('TotalFinal', parent=estilos['Normal'], fontSize=14, fontName='Helvetica-Bold', alignment=2)
         elementos.append(Paragraph(f"TOTAL: ${presupuesto['total']:,.0f}", estilo_total_final))
         
         elementos.append(Spacer(1, 30))
+        estilo_nota = ParagraphStyle('Nota', parent=estilos['Normal'], fontSize=8, textColor=colors.gray)
+        elementos.append(Paragraph("Los precios unitarios están expresados sin IVA. El IVA puede ser 10.5% o 21% según el producto.", estilo_nota))
         
-        # Nota sobre IVA
-        estilo_nota = ParagraphStyle(
-            'Nota',
-            parent=estilos['Normal'],
-            fontSize=8,
-            textColor=colors.gray
-        )
-        elementos.append(Paragraph("Nota: Los precios unitarios están expresados sin IVA. El porcentaje de IVA puede variar según el producto (10.5% o 21%).", estilo_nota))
-        
-        # Generar PDF
         doc.build(elementos)
         
-        # Construir URL pública
         base_url = os.environ.get('REPLIT_URL', 'https://tu-replit-url.repl.co')
         url_pdf = f"{base_url}/presupuestos/{nombre_archivo}"
         
-        # Actualizar presupuesto con URL del PDF
         if db is not None:
             db['presupuestos'].update_one(
                 {'_id': presupuesto['_id']},
@@ -304,52 +314,56 @@ def generar_pdf_presupuesto(presupuesto):
         
     except Exception as e:
         print(f'❌ Error generando PDF: {e}')
+        import traceback
+        traceback.print_exc()
         return None
-
-# ============== RUTA PARA SERVIR PDFs ==============
 
 @app.route('/presupuestos/<nombre_archivo>')
 def servir_presupuesto(nombre_archivo):
-    """Sirve los archivos PDF de presupuestos"""
     return send_from_directory(PRESUPUESTOS_DIR, nombre_archivo)
 
 # ============== PROCESAMIENTO DE MENSAJES ==============
 
 def detectar_confirmacion_presupuesto(texto):
-    """Detecta si el usuario está confirmando un presupuesto"""
     texto_lower = texto.lower().strip()
     confirmaciones = ['si', 'sí', 'dale', 'ok', 'confirmo', 'confirmado', 'acepto', 'va', 'listo', 'perfecto', 'de acuerdo']
-    
     for confirmacion in confirmaciones:
-        if confirmacion in texto_lower:
+        if texto_lower == confirmacion or texto_lower.startswith(confirmacion + ' ') or texto_lower.startswith(confirmacion + ','):
             return True
     return False
 
 def detectar_intencion_compra(texto):
-    """Detecta si el mensaje indica intención de compra/consulta de productos"""
     texto_lower = texto.lower()
     palabras_clave = ['precio', 'costo', 'vale', 'cuanto', 'cuánto', 'stock', 'tienen', 'tenes', 'tenés', 
                       'disponible', 'presupuesto', 'cotizar', 'cotización', 'comprar', 'necesito', 
                       'busco', 'quiero', 'camara', 'cámara', 'dvr', 'nvr', 'alarma', 'sensor']
-    
     for palabra in palabras_clave:
         if palabra in texto_lower:
             return True
     return False
 
+def detectar_quiere_presupuesto(texto):
+    """Detecta si el cliente quiere cerrar/confirmar un presupuesto"""
+    texto_lower = texto.lower()
+    frases = ['si todo', 'eso es todo', 'nada mas', 'nada más', 'solo eso', 'confirmo', 
+              'dale presupuesto', 'arma presupuesto', 'haceme presupuesto', 'pasame presupuesto',
+              'quiero presupuesto', 'manda presupuesto', 'enviame presupuesto']
+    for frase in frases:
+        if frase in texto_lower:
+            return True
+    return False
+
 def extraer_productos_del_mensaje(texto):
-    """Usa GPT para extraer productos mencionados en el mensaje"""
     try:
         respuesta = cliente_openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
-                    "content": """Sos un extractor de productos para una empresa de seguridad electrónica.
-                    Extraé los productos mencionados en el mensaje del cliente.
-                    Respondé SOLO con un JSON array de strings con los nombres/términos de búsqueda.
-                    Si no hay productos claros, respondé con un array vacío [].
-                    Ejemplos de productos: cámaras, DVR, NVR, sensores, alarmas, cables, fuentes, etc."""
+                    "content": """Extraé los productos mencionados en el mensaje.
+                    Respondé SOLO con un JSON array de strings con términos de búsqueda.
+                    Si no hay productos claros, respondé [].
+                    Ejemplos: cámaras, DVR, NVR, sensores, alarmas, cables, fuentes."""
                 },
                 {"role": "user", "content": texto}
             ],
@@ -357,7 +371,6 @@ def extraer_productos_del_mensaje(texto):
         )
         
         contenido = respuesta.choices[0].message.content.strip()
-        # Limpiar posibles caracteres extra
         contenido = contenido.replace('```json', '').replace('```', '').strip()
         productos = json.loads(contenido)
         return productos if isinstance(productos, list) else []
@@ -366,37 +379,99 @@ def extraer_productos_del_mensaje(texto):
         print(f'❌ Error extrayendo productos: {e}')
         return []
 
-def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, productos_encontrados=None, presupuesto_texto=None):
-    """Genera respuesta usando GPT con contexto del cliente"""
+def extraer_productos_de_historial(historial):
+    """Extrae productos del historial para armar presupuesto"""
     try:
-        # Construir contexto de productos si hay
+        if not historial:
+            return []
+        
+        ultimos = historial[-10:] if len(historial) > 10 else historial
+        texto_historial = "\n".join([msg.get('contenido', '') for msg in ultimos])
+        
+        respuesta = cliente_openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """Analizá la conversación y extraé los productos que el cliente quiere comprar.
+                    Respondé SOLO con un JSON array:
+                    [{"nombre": "nombre del producto", "cantidad": 1}]
+                    
+                    - Usá el nombre exacto del producto si se menciona
+                    - Si hay cantidad, usala. Si no, asumí 1
+                    - Si no hay productos claros, respondé []"""
+                },
+                {"role": "user", "content": texto_historial}
+            ],
+            temperature=0.1
+        )
+        
+        contenido = respuesta.choices[0].message.content.strip()
+        contenido = contenido.replace('```json', '').replace('```', '').strip()
+        productos = json.loads(contenido)
+        
+        productos_con_precio = []
+        for prod in productos:
+            resultados = buscar_en_api_productos(prod['nombre'])
+            if resultados:
+                info = formatear_producto_para_respuesta(resultados[0])
+                productos_con_precio.append({
+                    'nombre': info['nombre'],
+                    'cantidad': prod.get('cantidad', 1),
+                    'precio': info['precio'],
+                    'sku': info['sku'],
+                    'iva': info.get('iva', 21)
+                })
+            else:
+                productos_con_precio.append({
+                    'nombre': prod['nombre'],
+                    'cantidad': prod.get('cantidad', 1),
+                    'precio': 0,
+                    'sku': 'CONSULTAR',
+                    'iva': 21
+                })
+        
+        print(f'📦 Productos extraídos: {productos_con_precio}')
+        return productos_con_precio
+        
+    except Exception as e:
+        print(f'❌ Error extrayendo productos del historial: {e}')
+        return []
+
+def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, productos_encontrados=None, presupuesto_texto=None):
+    try:
         contexto_productos = ""
-        if productos_encontrados:
-            contexto_productos = "\n\nProductos encontrados en stock:\n"
+        if productos_encontrados and len(productos_encontrados) > 0:
+            contexto_productos = "\n\n=== PRODUCTOS EN STOCK ===\n"
             for prod in productos_encontrados:
                 info = formatear_producto_para_respuesta(prod)
                 contexto_productos += f"{info['texto']}\n"
+            contexto_productos += "===\nMostrá estos productos al cliente con precios."
         
         contexto_presupuesto = ""
         if presupuesto_texto:
             contexto_presupuesto = f"\n\nPresupuesto generado:\n{presupuesto_texto}"
         
-        mensajes_sistema = f"""Sos Ovidio, el asistente comercial de GRUPO SER, empresa de seguridad electrónica en Rosario, Argentina.
+        historial_texto = ""
+        if historial and len(historial) > 0:
+            ultimos = historial[-6:] if len(historial) > 6 else historial
+            for msg in ultimos:
+                rol = "Cliente" if msg.get('rol') == 'usuario' else "Ovidio"
+                historial_texto += f"{rol}: {msg.get('contenido', '')[:100]}\n"
+        
+        mensajes_sistema = f"""Sos Ovidio, asistente comercial de GRUPO SER, seguridad electrónica en Rosario.
 
-REGLAS DE COMPORTAMIENTO:
-- Sé cordial, profesional y concreto
-- NO uses regionalismos como "che", "boludo", etc.
-- Recordá el historial del cliente para no repetir preguntas
-- Si el cliente pregunta por productos, mostrá los resultados del stock
-- Los precios SIEMPRE se muestran SIN IVA, aclarando el porcentaje de IVA (puede ser 10.5% o 21% según el producto)
-- Si el cliente muestra intención de compra, ofrecé armar un presupuesto
-- Cuando muestres un presupuesto, preguntá si lo confirma para enviarle el PDF
+REGLAS:
+1. Cordial, profesional, CONCISO (3-4 líneas máximo)
+2. NO uses "che", "boludo"
+3. Precios SIN IVA, aclarar porcentaje UNA vez
+4. Si hay productos en contexto, mostralos directo
+5. NO repitas información ya dicha
 
-DATOS DEL CLIENTE:
-- Nombre: {nombre_cliente}
+Cliente: {nombre_cliente}
 
-HISTORIAL RECIENTE:
-{historial[-5:] if historial else 'Primera conversación'}
+Historial:
+{historial_texto if historial_texto else 'Primera conversación'}
 {contexto_productos}
 {contexto_presupuesto}"""
 
@@ -407,14 +482,14 @@ HISTORIAL RECIENTE:
                 {"role": "user", "content": mensaje_usuario}
             ],
             temperature=0.7,
-            max_tokens=500
+            max_tokens=400
         )
         
         return respuesta.choices[0].message.content
         
     except Exception as e:
         print(f'❌ Error generando respuesta: {e}')
-        return f"¡Hola {nombre_cliente}! Disculpá, estoy teniendo un inconveniente técnico. ¿Podés repetirme tu consulta?"
+        return f"¡Hola {nombre_cliente}! Disculpá, tuve un inconveniente. ¿Podés repetirme tu consulta?"
 
 # ============== WEBHOOK ==============
 
@@ -462,67 +537,58 @@ def procesar_mensaje(remitente, texto, value):
         nombre = contactos[0].get('profile', {}).get('name', 'Cliente') if contactos else 'Cliente'
         
         print(f'👤 Cliente: {nombre}')
+        print(f'📝 Texto: {texto}')
         
-        # Obtener historial del cliente
         if db is None:
             conectar_mongodb()
         
         cliente = db['clientes'].find_one({'telefono': remitente}) if db is not None else None
         historial = cliente.get('conversaciones', []) if cliente else []
         
-        # Verificar si hay presupuesto pendiente de confirmación
+        # Verificar presupuesto pendiente
         presupuesto_pendiente = obtener_presupuesto_pendiente(remitente)
         
+        print(f'📋 Presupuesto pendiente: {presupuesto_pendiente is not None}')
+        
+        # CASO 1: Hay presupuesto pendiente y cliente confirma → generar PDF
         if presupuesto_pendiente and detectar_confirmacion_presupuesto(texto):
-            # El cliente confirmó el presupuesto, generar PDF
+            print(f'🎯 Generando PDF para presupuesto #{presupuesto_pendiente.get("numero")}')
             url_pdf = generar_pdf_presupuesto(presupuesto_pendiente)
             if url_pdf:
-                respuesta = f"¡Perfecto {nombre}! 📄 Aquí tenés tu presupuesto en PDF:\n\n{url_pdf}\n\nPodés descargarlo o compartirlo. ¿Hay algo más en lo que pueda ayudarte?"
+                respuesta = f"¡Listo {nombre}! 📄 Tu presupuesto:\n\n{url_pdf}\n\n¿Algo más?"
             else:
-                respuesta = f"Disculpá {nombre}, hubo un problema al generar el PDF. Nuestro equipo lo revisará y te lo enviamos a la brevedad."
-        else:
-            # Flujo normal
-            productos_encontrados = []
-            presupuesto_texto = None
+                respuesta = f"Disculpá {nombre}, hubo un error generando el PDF. Lo revisamos y te lo enviamos."
+        
+        # CASO 2: Cliente quiere presupuesto → crear y mostrar
+        elif detectar_quiere_presupuesto(texto):
+            print(f'🎯 Cliente quiere presupuesto')
+            productos = extraer_productos_de_historial(historial)
             
-            # Detectar si es consulta de productos
+            if productos and any(p['precio'] > 0 for p in productos):
+                presupuesto = crear_presupuesto(remitente, nombre, productos)
+                if presupuesto:
+                    presupuesto_texto = formatear_presupuesto_texto(presupuesto)
+                    respuesta = f"{presupuesto_texto}\n\n¿Confirmás para enviarte el PDF?"
+                else:
+                    respuesta = f"Disculpá {nombre}, no pude armar el presupuesto. ¿Podés decirme qué productos necesitás?"
+            else:
+                respuesta = f"{nombre}, no encontré productos con precio en nuestra conversación. ¿Qué productos te interesa cotizar?"
+        
+        # CASO 3: Consulta normal
+        else:
+            productos_encontrados = []
+            
             if detectar_intencion_compra(texto):
+                print(f'🔍 Buscando productos...')
                 terminos = extraer_productos_del_mensaje(texto)
+                print(f'🔍 Términos: {terminos}')
                 
                 for termino in terminos:
                     resultados = buscar_en_api_productos(termino)
+                    print(f'🔍 "{termino}": {len(resultados)} resultados')
                     productos_encontrados.extend(resultados)
-                
-                # Si encontramos productos y parece querer comprar, crear presupuesto
-                if productos_encontrados and any(p in texto.lower() for p in ['presupuesto', 'cotizar', 'comprar', 'quiero']):
-                    items_presupuesto = []
-                    for prod in productos_encontrados[:3]:  # Máximo 3 productos
-                        info = formatear_producto_para_respuesta(prod)
-                        items_presupuesto.append({
-                            'nombre': info['nombre'],
-                            'precio': info['precio'],
-                            'cantidad': 1,
-                            'sku': info['sku'],
-                            'iva': info['iva']
-                        })
-                    
-                    if items_presupuesto:
-                        presupuesto = crear_presupuesto(remitente, nombre, items_presupuesto)
-                        if presupuesto:
-                            presupuesto_texto = formatear_presupuesto_texto(presupuesto)
             
-            # Generar respuesta con contexto
-            respuesta = generar_respuesta_con_contexto(
-                texto, 
-                historial, 
-                nombre, 
-                productos_encontrados,
-                presupuesto_texto
-            )
-            
-            # Si se generó presupuesto, agregar pregunta de confirmación
-            if presupuesto_texto:
-                respuesta += f"\n\n{presupuesto_texto}\n\n¿Confirmás este presupuesto? Si decís que sí, te envío el PDF para que lo tengas. 📄"
+            respuesta = generar_respuesta_con_contexto(texto, historial, nombre, productos_encontrados)
         
         enviar_mensaje_whatsapp(remitente, respuesta)
         guardar_conversacion(remitente, nombre, texto, respuesta)
@@ -570,12 +636,9 @@ def guardar_conversacion(telefono, nombre, mensaje, respuesta):
                 'telefono': telefono,
                 'nombre': nombre,
                 'cuit': '',
-                'razon_social': '',
                 'email': '',
                 'rubro': '',
                 'ubicacion': '',
-                'forma_pago': '',
-                'marcas_preferidas': '',
                 'estado': 'nuevo',
                 'conversaciones': [
                     {'rol': 'usuario', 'contenido': mensaje, 'fecha': ahora},
@@ -584,7 +647,7 @@ def guardar_conversacion(telefono, nombre, mensaje, respuesta):
                 'creado': ahora,
                 'actualizado': ahora
             })
-            print(f'👤 Cliente nuevo creado: {nombre}')
+            print(f'👤 Cliente nuevo: {nombre}')
         else:
             clientes.update_one(
                 {'telefono': telefono},
@@ -614,7 +677,8 @@ def health():
     return jsonify({'status': 'healthy', 'service': 'ovidio-bot'}), 200
 
 if __name__ == '__main__':
+    limpiar_pdfs_viejos()
     conectar_mongodb()
     port = int(os.environ.get('PORT', 3000))
-    print(f'🚀 Servidor Ovidio corriendo en puerto {port}')
+    print(f'🚀 Ovidio corriendo en puerto {port}')
     app.run(host='0.0.0.0', port=port, debug=False)
