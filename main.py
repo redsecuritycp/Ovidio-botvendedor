@@ -19,10 +19,13 @@ cliente_mongo = None
 db = None
 cliente_openai = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
 
-# Crear carpeta para presupuestos si no existe
-PRESUPUESTOS_DIR = os.path.join(os.path.dirname(__file__), 'presupuestos')
+# Crear carpeta para presupuestos en /tmp (persiste mejor en Replit)
+PRESUPUESTOS_DIR = '/tmp/presupuestos'
 if not os.path.exists(PRESUPUESTOS_DIR):
     os.makedirs(PRESUPUESTOS_DIR)
+    print(f'📁 Carpeta presupuestos creada: {PRESUPUESTOS_DIR}')
+else:
+    print(f'📁 Carpeta presupuestos existe: {PRESUPUESTOS_DIR}')
 
 DIAS_EXPIRACION = 15
 
@@ -400,6 +403,14 @@ def generar_pdf_presupuesto(presupuesto):
         elementos.append(Paragraph("GRUPO SER - Seguridad Electrónica | www.seguridadrosario.com", estilo_pie))
         
         doc.build(elementos)
+        
+        # Verificar que el archivo se creó
+        if os.path.exists(ruta_archivo):
+            tamanio = os.path.getsize(ruta_archivo)
+            print(f'✅ PDF creado físicamente: {ruta_archivo} ({tamanio} bytes)')
+        else:
+            print(f'❌ ERROR: El archivo PDF no se creó en {ruta_archivo}')
+            return None
         
         base_url = os.environ.get('REPLIT_URL', 'https://tu-replit-url.repl.co')
         url_pdf = f"{base_url}/presupuestos/{nombre_archivo}"
