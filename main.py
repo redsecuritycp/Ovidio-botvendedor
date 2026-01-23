@@ -523,19 +523,21 @@ def extraer_productos_de_historial(historial):
                     "role": "system",
                     "content": """Analizá esta conversación de ventas y extraé los productos que el cliente quiere comprar.
 
-IMPORTANTE: Buscá productos mencionados por el asistente (Ovidio) con precios, como:
-- "La cámara domo IP Hikvision DS-2CD2121G0-I tiene un costo de $5,000"
-- "Tenemos el DVR Hikvision a $15,000"
+IMPORTANTE: Buscá productos mencionados por el asistente con precios en CUALQUIER formato:
+- "El kit AX Pro cuesta USD 85 + IVA"
+- "El kit Ajax cuesta USD 105 + IVA (21%)"
+- "La cámara tiene un costo de $5,000"
+- "Tenemos el DVR a $15,000"
 
 Respondé SOLO con un JSON array:
-[{"nombre": "nombre exacto del producto", "cantidad": 1, "precio": 5000}]
+[{"nombre": "nombre del producto", "cantidad": 1, "precio": 85}]
 
 REGLAS:
-- Usá el nombre EXACTO del producto como aparece en la conversación
-- Extraé el precio numérico (sin signos ni puntos de miles)
+- Extraé el nombre del producto como aparece
+- El precio es el número en USD o pesos (sin IVA, sin signos, sin puntos)
 - Si el cliente pidió cantidad específica, usala. Si no, asumí 1
-- Si no hay productos con precio mencionados, respondé []
-- NO inventes productos que no estén en la conversación"""
+- Si hay varios productos mencionados, incluí TODOS
+- Si no hay productos con precio, respondé []"""
                 },
                 {"role": "user", "content": texto_historial}
             ],
@@ -610,12 +612,12 @@ REGLAS ESTRICTAS:
 2. Precios SIEMPRE en USD + IVA (ej: "USD 85 + IVA 21%")
 3. NUNCA incluir links ni URLs
 4. Si mostrás un producto, agregar UNA característica breve
-5. SIEMPRE terminar con "¿Algo más?"
+5. Terminar variando entre: "¿Algo más?", "¿Necesitás algo más?", "¿Te interesa algo más?", "¿Qué más necesitás?"
 6. NO usar "che", "boludo"
 7. Ser cordial y profesional
 
 EJEMPLO DE RESPUESTA:
-"El kit AX Pro cuesta USD 85 + IVA (21%). Inalámbrico, ideal para casas. ¿Algo más?"
+"El kit AX Pro cuesta USD 85 + IVA (21%). Inalámbrico, ideal para casas. ¿Necesitás algo más?"
 
 Cliente: {nombre_cliente}
 Historial: {historial_texto if historial_texto else 'Primera conversación'}
