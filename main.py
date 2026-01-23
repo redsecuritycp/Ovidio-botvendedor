@@ -13,6 +13,13 @@ from reportlab.lib.units import mm
 import uuid
 import glob
 
+try:
+    from services.cianbox_service import buscar_cliente_por_celular, inicializar_cianbox
+    CIANBOX_DISPONIBLE = True
+except ImportError:
+    CIANBOX_DISPONIBLE = False
+    print('⚠️ Servicio Cianbox no disponible')
+
 app = Flask(__name__)
 
 cliente_mongo = None
@@ -222,7 +229,7 @@ def formatear_presupuesto_texto(presupuesto):
 def generar_pdf_presupuesto(presupuesto):
     """Genera el PDF del presupuesto con diseño profesional"""
     try:
-        nombre_archivo = f"presupuesto_{presupuesto['numero']}_{uuid.uuid4().hex[:8]}.pdf"
+        nombre_archivo = f"presupuesto_{presupuesto['numero']}.pdf"
         ruta_archivo = os.path.join(PRESUPUESTOS_DIR, nombre_archivo)
         
         doc = SimpleDocTemplate(ruta_archivo, pagesize=A4,
@@ -662,10 +669,53 @@ def recibir_mensaje():
         print(f'❌ Error webhook: {e}')
         return jsonify({'status': 'error'}), 500
 
+def obtener_datos_cliente_cianbox(telefono):
+    """Busca el cliente en Cianbox y devuelve sus datos completos"""
+    if not CIANBOX_DISPONIBLE:
+        return None
+    
+    try:
+        tel_limpio = telefono.replace('+', '').replace(' ', '').replace('-', '')
+        if tel_limpio.startswith('549'):
+            tel_limpio = tel_limpio[3:]
+        elif tel_limpio.startswith('54'):
+            tel_limpio = tel_limpio[2:]
+        
+        print(f'🔍 Buscando cliente en Cianbox: {tel_limpio}')
+        cliente_cianbox = buscar_cliente_por_celular(tel_limpio)
+        
+        if cliente_cianbox:
+            nombre_completo = cliente_cianbox.get('razon_social') or cliente_cianbox.get('nombre', '')
+            print(f'✅ Cliente encontrado en Cianbox: {nombre_completo}')
+            return {
+                'nombre_completo': nombre_completo,
+                'cuit': cliente_cianbox.get('numero_documento', ''),
+                'email': cliente_cianbox.get('email', ''),
+                'direccion': cliente_cianbox.get('direccion', ''),
+                'localidad': cliente_cianbox.get('localidad', ''),
+                'vendedor_id': cliente_cianbox.get('vendedor_id'),
+                'vendedor_email': cliente_cianbox.get('vendedor_email', ''),
+                'condicion_iva': cliente_cianbox.get('condicion_iva', ''),
+                'encontrado': True
+            }
+        else:
+            print(f'⚠️ Cliente no encontrado en Cianbox')
+            return {'encontrado': False}
+            
+    except Exception as e:
+        print(f'❌ Error buscando en Cianbox: {e}')
+        return None
+
 def procesar_mensaje(remitente, texto, value):
     try:
         contactos = value.get('contacts', [{}])
-        nombre = contactos[0].get('profile', {}).get('name', 'Cliente') if contactos else 'Cliente'
+        nombre_whatsapp = contactos[0].get('profile', {}).get('name', 'Cliente') if contactos else 'Cliente'
+        
+        datos_cianbox = obtener_datos_cliente_cianbox(remitente)
+        if datos_cianbox and datos_cianbox.get('encontrado'):
+            nombre = datos_cianbox.get('nombre_completo', nombre_whatsapp)
+        else:
+            nombre = nombre_whatsapp
         
         print(f'👤 Cliente: {nombre}')
         print(f'📝 Texto: {texto}')
@@ -810,6 +860,8 @@ def health():
 if __name__ == '__main__':
     limpiar_pdfs_viejos()
     conectar_mongodb()
+    if CIANBOX_DISPONIBLE:
+        inicializar_cianbox()
     port = int(os.environ.get('PORT', 3000))
     print(f'🚀 Ovidio corriendo en puerto {port}')
     app.run(host='0.0.0.0', port=port, debug=False)
