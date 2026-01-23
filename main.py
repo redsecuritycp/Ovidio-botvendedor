@@ -383,23 +383,34 @@ def extraer_productos_de_historial(historial):
     """Extrae productos del historial para armar presupuesto"""
     try:
         if not historial:
+            print('⚠️ Historial vacío')
             return []
         
-        ultimos = historial[-10:] if len(historial) > 10 else historial
-        texto_historial = "\n".join([msg.get('contenido', '') for msg in ultimos])
+        ultimos = historial[-12:] if len(historial) > 12 else historial
+        texto_historial = "\n".join([f"{msg.get('rol', 'unknown')}: {msg.get('contenido', '')}" for msg in ultimos])
+        
+        print(f'📜 Historial para análisis:\n{texto_historial[:500]}...')
         
         respuesta = cliente_openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
-                    "content": """Analizá la conversación y extraé los productos que el cliente quiere comprar.
-                    Respondé SOLO con un JSON array:
-                    [{"nombre": "nombre del producto", "cantidad": 1}]
-                    
-                    - Usá el nombre exacto del producto si se menciona
-                    - Si hay cantidad, usala. Si no, asumí 1
-                    - Si no hay productos claros, respondé []"""
+                    "content": """Analizá esta conversación de ventas y extraé los productos que el cliente quiere comprar.
+
+IMPORTANTE: Buscá productos mencionados por el asistente (Ovidio) con precios, como:
+- "La cámara domo IP Hikvision DS-2CD2121G0-I tiene un costo de $5,000"
+- "Tenemos el DVR Hikvision a $15,000"
+
+Respondé SOLO con un JSON array:
+[{"nombre": "nombre exacto del producto", "cantidad": 1, "precio": 5000}]
+
+REGLAS:
+- Usá el nombre EXACTO del producto como aparece en la conversación
+- Extraé el precio numérico (sin signos ni puntos de miles)
+- Si el cliente pidió cantidad específica, usala. Si no, asumí 1
+- Si no hay productos con precio mencionados, respondé []
+- NO inventes productos que no estén en la conversación"""
                 },
                 {"role": "user", "content": texto_historial}
             ],
@@ -408,34 +419,42 @@ def extraer_productos_de_historial(historial):
         
         contenido = respuesta.choices[0].message.content.strip()
         contenido = contenido.replace('```json', '').replace('```', '').strip()
+        print(f'📦 GPT extrajo: {contenido}')
+        
         productos = json.loads(contenido)
         
-        productos_con_precio = []
+        if not productos:
+            print('⚠️ GPT no encontró productos')
+            return []
+        
+        # Completar datos faltantes
+        productos_completos = []
         for prod in productos:
-            resultados = buscar_en_api_productos(prod['nombre'])
-            if resultados:
-                info = formatear_producto_para_respuesta(resultados[0])
-                productos_con_precio.append({
-                    'nombre': info['nombre'],
-                    'cantidad': prod.get('cantidad', 1),
-                    'precio': info['precio'],
-                    'sku': info['sku'],
-                    'iva': info.get('iva', 21)
-                })
-            else:
-                productos_con_precio.append({
+            precio = prod.get('precio', 0)
+            
+            # Si no tiene precio, buscar en API
+            if precio == 0:
+                resultados = buscar_en_api_productos(prod['nombre'])
+                if resultados:
+                    info = formatear_producto_para_respuesta(resultados[0])
+                    precio = info['precio']
+            
+            if precio > 0:
+                productos_completos.append({
                     'nombre': prod['nombre'],
                     'cantidad': prod.get('cantidad', 1),
-                    'precio': 0,
-                    'sku': 'CONSULTAR',
-                    'iva': 21
+                    'precio': precio,
+                    'sku': prod.get('sku', 'N/A'),
+                    'iva': prod.get('iva', 21)
                 })
         
-        print(f'📦 Productos extraídos: {productos_con_precio}')
-        return productos_con_precio
+        print(f'✅ Productos finales: {productos_completos}')
+        return productos_completos
         
     except Exception as e:
         print(f'❌ Error extrayendo productos del historial: {e}')
+        import traceback
+        traceback.print_exc()
         return []
 
 def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, productos_encontrados=None, presupuesto_texto=None):
