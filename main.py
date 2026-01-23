@@ -463,13 +463,19 @@ def detectar_intencion_compra(texto):
 
 def detectar_quiere_presupuesto(texto):
     """Detecta si el cliente quiere cerrar/confirmar un presupuesto"""
-    texto_lower = texto.lower()
-    frases = ['si todo', 'eso es todo', 'nada mas', 'nada más', 'solo eso', 'confirmo', 
-              'dale presupuesto', 'arma presupuesto', 'haceme presupuesto', 'pasame presupuesto',
-              'quiero presupuesto', 'manda presupuesto', 'enviame presupuesto']
+    texto_lower = texto.lower().strip()
+    
+    # Si dice "presupuesto" solo o con algo más, quiere presupuesto
+    if 'presupuesto' in texto_lower:
+        return True
+    
+    # Frases que indican que quiere cerrar
+    frases = ['si todo', 'eso es todo', 'nada mas', 'nada más', 'solo eso', 
+              'armalo', 'si armalo', 'dale armalo', 'si dale']
     for frase in frases:
         if frase in texto_lower:
             return True
+    
     return False
 
 def extraer_productos_del_mensaje(texto):
@@ -604,7 +610,7 @@ REGLAS ESTRICTAS:
 2. Precios SIEMPRE en USD + IVA (ej: "USD 85 + IVA 21%")
 3. NUNCA incluir links ni URLs
 4. Si mostrás un producto, agregar UNA característica breve
-5. Terminar con "¿Algo más?" o "¿Te armo presupuesto?"
+5. SIEMPRE terminar con "¿Algo más?"
 6. NO usar "che", "boludo"
 7. Ser cordial y profesional
 
