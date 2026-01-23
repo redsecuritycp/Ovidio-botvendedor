@@ -583,8 +583,8 @@ def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, p
             contexto_productos = "\n\n=== PRODUCTOS EN STOCK ===\n"
             for prod in productos_encontrados:
                 info = formatear_producto_para_respuesta(prod)
-                contexto_productos += f"{info['texto']}\n"
-            contexto_productos += "===\nMostrá estos productos al cliente con precios."
+                contexto_productos += f"- {info['nombre']}: USD ${info['precio']} + IVA ({info['iva']}%), Stock: {info['stock']}\n"
+            contexto_productos += "===\n"
         
         contexto_presupuesto = ""
         if presupuesto_texto:
@@ -599,12 +599,20 @@ def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, p
         
         mensajes_sistema = f"""Sos Ovidio, asistente comercial de GRUPO SER, seguridad electrónica en Rosario.
 
-REGLAS:
-1. Cordial, profesional, CONCISO (3-4 líneas máximo)
-2. NO uses "che", "boludo"
-3. Precios SIN IVA, aclarar porcentaje UNA vez
-4. Si hay productos en contexto, mostralos directo
-5. NO repitas información ya dicha
+REGLAS OBLIGATORIAS:
+1. Respuestas CORTAS: máximo 2 líneas de WhatsApp
+2. NUNCA incluir links ni URLs de ningún tipo
+3. Precios SIEMPRE en dólares (USD) + IVA
+4. Si hay producto, dar: nombre, precio en USD, UNA característica básica
+5. Terminar preguntando si quiere presupuesto
+6. NO uses "che", "boludo"
+7. Cordial y profesional
+
+FORMATO DE RESPUESTA PARA PRODUCTOS:
+"[Producto] cuesta USD $[precio] + IVA ([%]). [Una característica corta]. ¿Te armo presupuesto?"
+
+EJEMPLO:
+"El kit AX Pro cuesta USD $85 + IVA (21%). Inalámbrico, ideal para casas. ¿Te armo presupuesto?"
 
 Cliente: {nombre_cliente}
 
@@ -620,14 +628,14 @@ Historial:
                 {"role": "user", "content": mensaje_usuario}
             ],
             temperature=0.7,
-            max_tokens=400
+            max_tokens=150
         )
         
         return respuesta.choices[0].message.content
         
     except Exception as e:
         print(f'❌ Error generando respuesta: {e}')
-        return f"¡Hola {nombre_cliente}! Disculpá, tuve un inconveniente. ¿Podés repetirme tu consulta?"
+        return f"Hola {nombre_cliente}, disculpá, tuve un inconveniente. ¿Podés repetirme tu consulta?"
 
 # ============== WEBHOOK ==============
 
