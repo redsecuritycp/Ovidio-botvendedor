@@ -465,16 +465,32 @@ def detectar_quiere_presupuesto(texto):
     """Detecta si el cliente quiere cerrar/confirmar un presupuesto"""
     texto_lower = texto.lower().strip()
     
-    # Si dice "presupuesto" solo o con algo más, quiere presupuesto
+    # Si menciona "presupuesto" explícitamente
     if 'presupuesto' in texto_lower:
         return True
     
-    # Frases que indican que quiere cerrar
-    frases = ['si todo', 'eso es todo', 'nada mas', 'nada más', 'solo eso', 
-              'armalo', 'si armalo', 'dale armalo', 'si dale']
-    for frase in frases:
+    # Frases que indican "ya terminé de consultar"
+    frases_fin = [
+        'nada mas', 'nada más', 'no nada', 'no gracias', 'no gracais',
+        'solo esto', 'solo eso', 'eso solo', 'es todo', 'era eso', 'eso era',
+        'ya está', 'ya esta', 'listo', 'no por ahora', 'con eso', 
+        'eso nomás', 'eso nomas', 'estoy bien', 'está bien', 'esta bien',
+        'perfecto', 'bueno dale', 'dale listo', 'ok listo', 'ok eso',
+        'no necesito más', 'no necesito mas', 'suficiente', 'con eso estoy',
+        'nada por ahora', 'todo bien', 'eso sería todo', 'eso seria todo',
+        'si eso', 'sí eso', 'solo esos', 'solo estos', 'nomas eso',
+        'no mas', 'no más', 'ya no', 'eso nomás gracias', 'gracias eso',
+        'si todo', 'sí todo', 'armalo', 'si armalo', 'dale armalo', 'si dale'
+    ]
+    
+    for frase in frases_fin:
         if frase in texto_lower:
             return True
+    
+    # Respuestas cortas de cierre
+    respuestas_cortas = ['no', 'nada', 'listo', 'dale', 'ok', 'bueno', 'perfecto', 'gracias']
+    if texto_lower in respuestas_cortas:
+        return True
     
     return False
 
@@ -729,20 +745,20 @@ def procesar_mensaje(remitente, texto, value):
             else:
                 respuesta = f"Disculpá {nombre}, hubo un error generando el PDF. Lo revisamos y te lo enviamos."
         
-        # CASO 2: Cliente quiere presupuesto → crear y mostrar
+        # CASO 2: Cliente quiere presupuesto o indica que terminó de consultar
         elif detectar_quiere_presupuesto(texto):
-            print(f'🎯 Cliente quiere presupuesto')
+            print(f'🎯 Cliente quiere presupuesto / terminó de consultar')
             productos = extraer_productos_de_historial(historial)
             
             if productos and any(p['precio'] > 0 for p in productos):
                 presupuesto = crear_presupuesto(remitente, nombre, productos)
                 if presupuesto:
                     presupuesto_texto = formatear_presupuesto_texto(presupuesto)
-                    respuesta = f"{presupuesto_texto}\n\n¿Confirmás para enviarte el PDF?"
+                    respuesta = f"Perfecto {nombre}, te armo el presupuesto:\n\n{presupuesto_texto}\n\n¿Confirmás para enviarte el PDF?"
                 else:
                     respuesta = f"Disculpá {nombre}, no pude armar el presupuesto. ¿Podés decirme qué productos necesitás?"
             else:
-                respuesta = f"{nombre}, no encontré productos con precio en nuestra conversación. ¿Qué productos te interesa cotizar?"
+                respuesta = f"Perfecto {nombre}. Si necesitás cotizar algo, avisame. ¡Estoy para ayudarte!"
         
         # CASO 3: Consulta normal
         else:
