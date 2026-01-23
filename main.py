@@ -293,7 +293,7 @@ def generar_pdf_presupuesto(presupuesto):
         url_pdf = f"{base_url}/presupuestos/{nombre_archivo}"
         
         # Actualizar presupuesto con URL del PDF
-        if db:
+        if db is not None:
             db['presupuestos'].update_one(
                 {'_id': presupuesto['_id']},
                 {'$set': {'pdf_url': url_pdf, 'estado': 'enviado', 'actualizado': datetime.utcnow()}}
@@ -467,7 +467,7 @@ def procesar_mensaje(remitente, texto, value):
         if db is None:
             conectar_mongodb()
         
-        cliente = db['clientes'].find_one({'telefono': remitente}) if db else None
+        cliente = db['clientes'].find_one({'telefono': remitente}) if db is not None else None
         historial = cliente.get('conversaciones', []) if cliente else []
         
         # Verificar si hay presupuesto pendiente de confirmación
