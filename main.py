@@ -12,6 +12,9 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.units import mm
 import uuid
 import glob
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 try:
     from services.cianbox_service import buscar_cliente_por_celular, inicializar_cianbox
@@ -79,6 +82,251 @@ def conectar_mongodb():
     except Exception as e:
         print(f'❌ Error MongoDB: {e}')
         return None
+
+# ============== FUNCIONES DE EMAIL ==============
+
+def enviar_email(destinatario, asunto, cuerpo_html):
+    """Envía un email usando SMTP de Gmail"""
+    try:
+        email_user = os.environ.get('EMAIL_USER')
+        email_pass = os.environ.get('EMAIL_PASS')
+        
+        if not email_user or not email_pass:
+            print('⚠️ EMAIL_USER o EMAIL_PASS no configurados, saltando email')
+            return False
+        
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = asunto
+        msg['From'] = email_user
+        msg['To'] = destinatario
+        
+        parte_html = MIMEText(cuerpo_html, 'html')
+        msg.attach(parte_html)
+        
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(email_user, email_pass)
+            server.sendmail(email_user, destinatario, msg.as_string())
+        
+        print(f'✅ Email enviado a {destinatario}')
+        return True
+        
+    except Exception as e:
+        print(f'❌ Error enviando email: {e}')
+        return False
+
+def notificar_vendedor_presupuesto(presupuesto):
+    """Notifica al vendedor cuando se genera un presupuesto"""
+    try:
+        vendedor_email = os.environ.get('VENDEDOR_EMAIL')
+        if not vendedor_email:
+            print('⚠️ VENDEDOR_EMAIL no configurado')
+            return False
+        
+        items_html = ""
+        for item in presupuesto['items']:
+            items_html += f"<tr><td>{item['nombre']}</td><td>{item['cantidad']}</td><td>USD {item['precio']}</td></tr>"
+        
+        cuerpo = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif;">
+            <h2 style="color: #00BCD4;">📋 Nuevo Presupuesto #{presupuesto['numero']}</h2>
+            
+            <h3>Cliente:</h3>
+            <p>
+                <strong>Nombre:</strong> {presupuesto['nombre_cliente']}<br>
+                <strong>Teléfono:</strong> {presupuesto['telefono']}<br>
+            </p>
+            
+            <h3>Productos:</h3>
+            <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse;">
+                <tr style="background-color: #00BCD4; color: white;">
+                    <th>Producto</th>
+                    <th>Cantidad</th>
+                    <th>Precio USD</th>
+                </tr>
+                {items_html}
+            </table>
+            
+            <p style="font-size: 18px; margin-top: 20px;">
+                <strong>Total: USD {presupuesto['subtotal']:.0f} + IVA</strong>
+            </p>
+            
+            <p style="color: #666; margin-top: 30px;">
+                Generado automáticamente por Ovidio Bot.
+            </p>
+        </body>
+        </html>
+        """
+        
+        return enviar_email(vendedor_email, f"📋 Presupuesto #{presupuesto['numero']} - {presupuesto['nombre_cliente']}", cuerpo)
+        
+    except Exception as e:
+        print(f'❌ Error notificando vendedor: {e}')
+        return False
+
+def notificar_compras_sin_stock(producto, cliente_nombre, cliente_telefono, historial):
+    """Notifica a compras cuando no hay stock de un producto"""
+    try:
+        compras_email = os.environ.get('EMAIL_TO_COMPRAS')
+        if not compras_email:
+            print('⚠️ COMPRAS_EMAIL no configurado')
+            return False
+        
+        historial_html = ""
+        for msg in historial[-10:]:
+            rol = "Cliente" if msg.get('rol') == 'usuario' else "Ovidio"
+            contenido = msg.get('contenido', '')[:200]
+            color = "#333" if rol == "Cliente" else "#00BCD4"
+            historial_html += f"<p><strong style='color:{color}'>{rol}:</strong> {contenido}</p>"
+        
+        cuerpo = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif;">
+            <h2 style="color: #FF5722;">⚠️ Producto Sin Stock</h2>
+            
+            <h3>Producto Solicitado:</h3>
+            <p style="font-size: 18px; background-color: #FFF3E0; padding: 10px; border-radius: 5px;">
+                <strong>{producto}</strong>
+            </p>
+            
+            <h3>Cliente:</h3>
+            <p>
+                <strong>Nombre:</strong> {cliente_nombre}<br>
+                <strong>Teléfono:</strong> <a href="https://wa.me/{cliente_telefono}">{cliente_telefono}</a><br>
+            </p>
+            
+            <h3>Conversación:</h3>
+            <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px;">
+                {historial_html if historial_html else '<p>Sin historial disponible</p>'}
+            </div>
+            
+            <p style="color: #666; margin-top: 30px;">
+                Por favor consultar precio y demora.<br>
+                Generado automáticamente por Ovidio Bot.
+            </p>
+        </body>
+        </html>
+        """
+        
+        return enviar_email(compras_email, f"⚠️ Sin Stock: {producto} - {cliente_nombre}", cuerpo)
+        
+    except Exception as e:
+        print(f'❌ Error notificando compras: {e}')
+        return False
+
+def extraer_datos_personales(texto, datos_actuales=None):
+    """Extrae información personal/humana de la conversación para generar vínculo"""
+    try:
+        datos = datos_actuales or {}
+        memoria = datos.get('memoria_conversaciones', [])
+        
+        respuesta = cliente_openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """Analizá el mensaje y extraé información PERSONAL/HUMANA que sirva para generar vínculo con el cliente.
+
+NO extraer datos comerciales (eso ya está en Cianbox).
+SÍ extraer cosas personales que un vendedor recordaría:
+
+- Salud: si menciona médico, enfermedad, dolor, accidente (propio o familia)
+- Familia: si menciona hijos, esposa, padres, hermanos
+- Planes: viajes, vacaciones, fin de semana
+- Hobbies: pesca, fútbol, deportes, actividades
+- Trabajo: proyectos en curso, obras, clientes suyos
+- Estado de ánimo: si está apurado, estresado, contento
+- Cualquier dato personal que sirva para preguntar después
+
+Respondé SOLO con JSON:
+{
+    "evento": "descripción breve de lo que mencionó",
+    "tipo": "salud|familia|planes|hobby|trabajo|otro",
+    "seguimiento": "pregunta para hacer en próxima conversación"
+}
+
+Si no hay nada personal, respondé {}
+
+Ejemplos:
+- "estoy en el médico con mi viejo" → {"evento": "padre enfermo, en médico", "tipo": "familia", "seguimiento": "¿Cómo sigue tu viejo?"}
+- "el finde me voy a pescar" → {"evento": "va a pescar el fin de semana", "tipo": "hobby", "seguimiento": "¿Pudiste ir a pescar?"}
+- "estoy terminando una obra en funes" → {"evento": "obra en Funes en curso", "tipo": "trabajo", "seguimiento": "¿Cómo va la obra en Funes?"}"""
+                },
+                {"role": "user", "content": texto}
+            ],
+            temperature=0.1
+        )
+        
+        contenido = respuesta.choices[0].message.content.strip()
+        contenido = contenido.replace('```json', '').replace('```', '').strip()
+        
+        nuevo_evento = json.loads(contenido)
+        
+        if nuevo_evento and nuevo_evento.get('evento'):
+            # Agregar timestamp
+            nuevo_evento['fecha'] = datetime.utcnow().isoformat()
+            
+            # Agregar a la memoria (máximo 10 eventos)
+            memoria.append(nuevo_evento)
+            if len(memoria) > 10:
+                memoria = memoria[-10:]
+            
+            datos['memoria_conversaciones'] = memoria
+            print(f'📝 Evento personal guardado: {nuevo_evento["evento"]}')
+        
+        return datos
+        
+    except Exception as e:
+        print(f'⚠️ Error extrayendo datos personales: {e}')
+        return datos_actuales or {}
+
+def actualizar_datos_cliente(telefono, datos_personales):
+    """Actualiza los datos personales del cliente en MongoDB"""
+    try:
+        if db is None or not datos_personales:
+            return
+        
+        db['clientes'].update_one(
+            {'telefono': telefono},
+            {'$set': {'datos_personales': datos_personales, 'actualizado': datetime.utcnow()}}
+        )
+        print(f'✅ Datos personales actualizados para {telefono}')
+        
+    except Exception as e:
+        print(f'❌ Error actualizando datos cliente: {e}')
+
+def formatear_contexto_cliente(cliente, datos_cianbox=None):
+    """Formatea los datos del cliente para incluir en el prompt"""
+    if not cliente and not datos_cianbox:
+        return ""
+    
+    partes = []
+    
+    # Info de Cianbox (comercial)
+    if datos_cianbox:
+        if datos_cianbox.get('razon_social'):
+            partes.append(f"Razón social: {datos_cianbox['razon_social']}")
+        if datos_cianbox.get('localidad'):
+            partes.append(f"Ubicación: {datos_cianbox['localidad']}")
+        if datos_cianbox.get('descuento') and datos_cianbox['descuento'] > 0:
+            partes.append(f"Descuento asignado: {datos_cianbox['descuento']}%")
+    
+    # Memoria de conversaciones (personal/humano)
+    if cliente:
+        datos = cliente.get('datos_personales', {})
+        memoria = datos.get('memoria_conversaciones', [])
+        
+        if memoria:
+            partes.append("\n=== MEMORIA PERSONAL (usá esto para generar vínculo) ===")
+            for evento in memoria[-5:]:  # Últimos 5 eventos
+                seguimiento = evento.get('seguimiento', '')
+                partes.append(f"- {evento.get('evento', '')} → Podés preguntar: \"{seguimiento}\"")
+            partes.append("===")
+    
+    if partes:
+        return "\n".join(partes)
+    
+    return ""
 
 # ============== FUNCIONES DE STOCK ==============
 
@@ -600,7 +848,7 @@ REGLAS:
         traceback.print_exc()
         return []
 
-def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, productos_encontrados=None, presupuesto_texto=None):
+def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, productos_encontrados=None, presupuesto_texto=None, info_cliente=None):
     try:
         contexto_productos = ""
         if productos_encontrados and len(productos_encontrados) > 0:
@@ -621,7 +869,10 @@ def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, p
                 rol = "Cliente" if msg.get('rol') == 'usuario' else "Ovidio"
                 historial_texto += f"{rol}: {msg.get('contenido', '')[:100]}\n"
         
+        contexto_cliente = info_cliente if info_cliente else ""
+        
         mensajes_sistema = f"""Sos Ovidio, asesor comercial de GRUPO SER (seguridad electrónica, Rosario).
+Vendés SOLO a instaladores/empresas (B2B), no a consumidores finales.
 
 REGLAS ESTRICTAS:
 1. Respuestas de MÁXIMO 2 líneas de WhatsApp
@@ -630,12 +881,21 @@ REGLAS ESTRICTAS:
 4. Si mostrás un producto, agregar UNA característica breve
 5. Terminar variando entre: "¿Algo más?", "¿Necesitás algo más?", "¿Te interesa algo más?", "¿Qué más necesitás?"
 6. NO usar "che", "boludo"
-7. Ser cordial y profesional
+7. Ser cordial y MUY humano
 
-EJEMPLO DE RESPUESTA:
-"El kit AX Pro cuesta USD 85 + IVA (21%). Inalámbrico, ideal para casas. ¿Necesitás algo más?"
+MEMORIA PERSONAL - MUY IMPORTANTE:
+Si tenés memoria de conversaciones anteriores (familia, salud, planes, trabajo), 
+usala naturalmente para conectar. Ejemplos:
+- Si sabés que su padre estaba enfermo: "¿Cómo sigue tu viejo?"
+- Si sabés que fue a pescar: "¿Qué tal la pesca?"
+- Si tenía una obra: "¿Cómo va esa obra?"
+No fuerces la pregunta, pero si viene al caso, preguntá.
+
+EJEMPLO DE RESPUESTA CON VÍNCULO:
+"¡Hola! El DVR 8ch está USD 95 + IVA. ¿Cómo sigue tu viejo, todo bien?"
 
 Cliente: {nombre_cliente}
+{contexto_cliente}
 Historial: {historial_texto if historial_texto else 'Primera conversación'}
 {contexto_productos}
 {contexto_presupuesto}"""
@@ -696,9 +956,10 @@ def recibir_mensaje():
         print(f'❌ Error webhook: {e}')
         return jsonify({'status': 'error'}), 500
 
-def obtener_nombre_cianbox(telefono):
-    """Busca nombre completo en Cianbox por teléfono"""
+def obtener_cliente_cianbox(telefono):
+    """Busca cliente completo en Cianbox por teléfono"""
     if not CIANBOX_DISPONIBLE:
+        print('⚠️ Cianbox no disponible')
         return None
     try:
         tel_limpio = telefono.replace('+', '').replace(' ', '').replace('-', '')
@@ -707,11 +968,48 @@ def obtener_nombre_cianbox(telefono):
         elif tel_limpio.startswith('54'):
             tel_limpio = tel_limpio[2:]
         
+        print(f'🔍 Buscando en Cianbox: {tel_limpio}')
         cliente = buscar_cliente_por_celular(tel_limpio)
         if cliente:
-            return cliente.get('razon_social') or cliente.get('nombre')
+            print(f'✅ Cianbox encontró: {cliente.get("razon_social")}')
+            return cliente
+        print(f'⚠️ Cianbox: No se encontró cliente con celular {tel_limpio}')
         return None
-    except:
+    except Exception as e:
+        print(f'❌ Error buscando en Cianbox: {e}')
+        return None
+
+def verificar_cliente_por_cuit_email(texto, telefono):
+    """Intenta verificar cliente por CUIT o email mencionado en el mensaje"""
+    try:
+        if not CIANBOX_DISPONIBLE:
+            return None
+        
+        # Buscar CUIT (11 dígitos)
+        import re
+        cuit_match = re.search(r'\b(\d{2}-?\d{8}-?\d{1})\b', texto)
+        if cuit_match:
+            cuit = cuit_match.group(1).replace('-', '')
+            from services.cianbox_service import buscar_cliente_por_cuit
+            cliente = buscar_cliente_por_cuit(cuit)
+            if cliente:
+                print(f'✅ Cliente verificado por CUIT: {cliente.get("razon_social")}')
+                return cliente
+        
+        # Buscar email
+        email_match = re.search(r'\b[\w.-]+@[\w.-]+\.\w+\b', texto)
+        if email_match:
+            email = email_match.group(0)
+            from services.cianbox_service import buscar_cliente_por_email
+            cliente = buscar_cliente_por_email(email)
+            if cliente:
+                print(f'✅ Cliente verificado por email: {cliente.get("razon_social")}')
+                return cliente
+        
+        return None
+        
+    except Exception as e:
+        print(f'❌ Error verificando cliente: {e}')
         return None
 
 def procesar_mensaje(remitente, texto, value):
@@ -719,10 +1017,25 @@ def procesar_mensaje(remitente, texto, value):
         contactos = value.get('contacts', [{}])
         nombre_wa = contactos[0].get('profile', {}).get('name', 'Cliente') if contactos else 'Cliente'
         
-        nombre_cianbox = obtener_nombre_cianbox(remitente)
-        nombre = nombre_cianbox if nombre_cianbox else nombre_wa
+        # Buscar cliente en Cianbox
+        datos_cianbox = obtener_cliente_cianbox(remitente)
         
-        print(f'👤 Cliente: {nombre}' + (' (Cianbox)' if nombre_cianbox else ' (WhatsApp)'))
+        if datos_cianbox:
+            nombre = datos_cianbox.get('razon_social') or datos_cianbox.get('nombre') or nombre_wa
+            es_cliente_verificado = True
+            print(f'✅ Cliente verificado en Cianbox: {nombre}')
+        else:
+            nombre = nombre_wa
+            es_cliente_verificado = False
+            print(f'⚠️ Cliente NO está en Cianbox: {nombre}')
+        
+        # Si no está verificado, intentar verificar por CUIT o email en el mensaje
+        if not es_cliente_verificado:
+            datos_cianbox = verificar_cliente_por_cuit_email(texto, remitente)
+            if datos_cianbox:
+                nombre = datos_cianbox.get('razon_social') or datos_cianbox.get('nombre') or nombre_wa
+                es_cliente_verificado = True
+                print(f'✅ Cliente verificado por CUIT/email: {nombre}')
         print(f'📝 Texto: {texto}')
         
         if db is None:
@@ -741,7 +1054,23 @@ def procesar_mensaje(remitente, texto, value):
             print(f'🎯 Generando PDF para presupuesto #{presupuesto_pendiente.get("numero")}')
             url_pdf = generar_pdf_presupuesto(presupuesto_pendiente)
             if url_pdf:
-                respuesta = f"¡Listo {nombre}! 📄 Tu presupuesto:\n\n{url_pdf}\n\n¿Algo más?"
+                # Enviar PDF como archivo adjunto
+                numero = presupuesto_pendiente.get('numero')
+                nombre_archivo = f"presupuesto_{numero}.pdf"
+                ruta_archivo = os.path.join(PRESUPUESTOS_DIR, nombre_archivo)
+                
+                resultado = enviar_documento_whatsapp(
+                    remitente, 
+                    ruta_archivo, 
+                    f"Presupuesto_GRUPOSER_{numero}.pdf",
+                    f"¡Listo {nombre}! 📄 Acá tenés tu presupuesto. ¿Algo más en que pueda ayudarte?"
+                )
+                
+                if resultado:
+                    guardar_conversacion(remitente, nombre, texto, f"[PDF enviado: Presupuesto #{numero}]")
+                    return  # Ya enviamos el documento, no enviar mensaje de texto
+                else:
+                    respuesta = f"Disculpá {nombre}, hubo un error enviando el PDF. Lo revisamos y te lo enviamos."
             else:
                 respuesta = f"Disculpá {nombre}, hubo un error generando el PDF. Lo revisamos y te lo enviamos."
         
@@ -755,6 +1084,8 @@ def procesar_mensaje(remitente, texto, value):
                 if presupuesto:
                     presupuesto_texto = formatear_presupuesto_texto(presupuesto)
                     respuesta = f"Perfecto {nombre}, te armo el presupuesto:\n\n{presupuesto_texto}\n\n¿Confirmás para enviarte el PDF?"
+                    # Notificar al vendedor por email
+                    notificar_vendedor_presupuesto(presupuesto)
                 else:
                     respuesta = f"Disculpá {nombre}, no pude armar el presupuesto. ¿Podés decirme qué productos necesitás?"
             else:
@@ -774,7 +1105,20 @@ def procesar_mensaje(remitente, texto, value):
                     print(f'🔍 "{termino}": {len(resultados)} resultados')
                     productos_encontrados.extend(resultados)
             
-            respuesta = generar_respuesta_con_contexto(texto, historial, nombre, productos_encontrados)
+            # Extraer y guardar datos personales de la conversación
+            datos_actuales = cliente.get('datos_personales', {}) if cliente else {}
+            datos_personales = extraer_datos_personales(texto, datos_actuales)
+            if datos_personales and datos_personales != datos_actuales:
+                actualizar_datos_cliente(remitente, datos_personales)
+            
+            # Generar respuesta con contexto del cliente
+            info_cliente = formatear_contexto_cliente(cliente, datos_cianbox if es_cliente_verificado else None)
+            
+            # Si NO es cliente verificado y pregunta por precios, pedir que se identifique
+            if not es_cliente_verificado and detectar_intencion_compra(texto):
+                respuesta = f"¡Hola {nombre}! Para pasarte precios necesito verificar tu cuenta. ¿Me pasás tu CUIT o el email con el que estás registrado?"
+            else:
+                respuesta = generar_respuesta_con_contexto(texto, historial, nombre, productos_encontrados, None, info_cliente)
         
         enviar_mensaje_whatsapp(remitente, respuesta)
         guardar_conversacion(remitente, nombre, texto, respuesta)
@@ -783,6 +1127,60 @@ def procesar_mensaje(remitente, texto, value):
         print(f'❌ Error procesando: {e}')
         import traceback
         traceback.print_exc()
+
+def enviar_documento_whatsapp(destinatario, ruta_archivo, nombre_archivo, caption=""):
+    """Envía un documento PDF por WhatsApp"""
+    try:
+        # Primero subir el archivo a Meta
+        url_upload = f"https://graph.facebook.com/v21.0/{os.environ.get('PHONE_NUMBER_ID')}/media"
+        
+        headers = {
+            'Authorization': f"Bearer {os.environ.get('WHATSAPP_TOKEN')}"
+        }
+        
+        with open(ruta_archivo, 'rb') as f:
+            files = {
+                'file': (nombre_archivo, f, 'application/pdf'),
+                'messaging_product': (None, 'whatsapp'),
+                'type': (None, 'application/pdf')
+            }
+            response_upload = requests.post(url_upload, headers=headers, files=files)
+        
+        if response_upload.status_code != 200:
+            print(f'❌ Error subiendo PDF: {response_upload.text}')
+            return None
+        
+        media_id = response_upload.json().get('id')
+        print(f'✅ PDF subido, media_id: {media_id}')
+        
+        # Ahora enviar el documento
+        url_send = f"https://graph.facebook.com/v21.0/{os.environ.get('PHONE_NUMBER_ID')}/messages"
+        
+        payload = {
+            'messaging_product': 'whatsapp',
+            'to': destinatario,
+            'type': 'document',
+            'document': {
+                'id': media_id,
+                'filename': nombre_archivo,
+                'caption': caption
+            }
+        }
+        
+        headers_send = {
+            'Authorization': f"Bearer {os.environ.get('WHATSAPP_TOKEN')}",
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.post(url_send, headers=headers_send, json=payload)
+        print(f'✅ Documento enviado a {destinatario}')
+        return response.json()
+    
+    except Exception as e:
+        print(f'❌ Error enviando documento: {e}')
+        import traceback
+        traceback.print_exc()
+        return None
 
 def enviar_mensaje_whatsapp(destinatario, texto):
     try:
