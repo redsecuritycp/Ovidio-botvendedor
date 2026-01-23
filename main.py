@@ -13,6 +13,13 @@ from reportlab.lib.units import mm
 import uuid
 import glob
 
+try:
+    from services.cianbox_service import buscar_cliente_por_celular, inicializar_cianbox
+    CIANBOX_DISPONIBLE = True
+except ImportError:
+    CIANBOX_DISPONIBLE = False
+    print('⚠️ Servicio Cianbox no disponible')
+
 app = Flask(__name__)
 
 cliente_mongo = None
@@ -222,7 +229,7 @@ def formatear_presupuesto_texto(presupuesto):
 def generar_pdf_presupuesto(presupuesto):
     """Genera el PDF del presupuesto con diseño profesional"""
     try:
-        nombre_archivo = f"presupuesto_{presupuesto['numero']}_{uuid.uuid4().hex[:8]}.pdf"
+        nombre_archivo = f"presupuesto_{presupuesto['numero']}.pdf"
         ruta_archivo = os.path.join(PRESUPUESTOS_DIR, nombre_archivo)
         
         doc = SimpleDocTemplate(ruta_archivo, pagesize=A4,
@@ -573,11 +580,11 @@ def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, p
     try:
         contexto_productos = ""
         if productos_encontrados and len(productos_encontrados) > 0:
-            contexto_productos = "\n\n=== PRODUCTOS EN STOCK ===\n"
+            contexto_productos = "\n\n=== PRODUCTOS ENCONTRADOS ===\n"
             for prod in productos_encontrados:
                 info = formatear_producto_para_respuesta(prod)
-                contexto_productos += f"{info['texto']}\n"
-            contexto_productos += "===\nMostrá estos productos al cliente con precios."
+                contexto_productos += f"- {info['nombre']}: USD {info['precio']} + IVA ({info['iva']}%)\n"
+            contexto_productos += "===\n"
         
         contexto_presupuesto = ""
         if presupuesto_texto:
@@ -590,19 +597,22 @@ def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, p
                 rol = "Cliente" if msg.get('rol') == 'usuario' else "Ovidio"
                 historial_texto += f"{rol}: {msg.get('contenido', '')[:100]}\n"
         
-        mensajes_sistema = f"""Sos Ovidio, asistente comercial de GRUPO SER, seguridad electrónica en Rosario.
+        mensajes_sistema = f"""Sos Ovidio, asesor comercial de GRUPO SER (seguridad electrónica, Rosario).
 
-REGLAS:
-1. Cordial, profesional, CONCISO (3-4 líneas máximo)
-2. NO uses "che", "boludo"
-3. Precios SIN IVA, aclarar porcentaje UNA vez
-4. Si hay productos en contexto, mostralos directo
-5. NO repitas información ya dicha
+REGLAS ESTRICTAS:
+1. Respuestas de MÁXIMO 2 líneas de WhatsApp
+2. Precios SIEMPRE en USD + IVA (ej: "USD 85 + IVA 21%")
+3. NUNCA incluir links ni URLs
+4. Si mostrás un producto, agregar UNA característica breve
+5. Terminar con "¿Algo más?" o "¿Te armo presupuesto?"
+6. NO usar "che", "boludo"
+7. Ser cordial y profesional
+
+EJEMPLO DE RESPUESTA:
+"El kit AX Pro cuesta USD 85 + IVA (21%). Inalámbrico, ideal para casas. ¿Algo más?"
 
 Cliente: {nombre_cliente}
-
-Historial:
-{historial_texto if historial_texto else 'Primera conversación'}
+Historial: {historial_texto if historial_texto else 'Primera conversación'}
 {contexto_productos}
 {contexto_presupuesto}"""
 
@@ -613,14 +623,14 @@ Historial:
                 {"role": "user", "content": mensaje_usuario}
             ],
             temperature=0.7,
-            max_tokens=400
+            max_tokens=150
         )
         
         return respuesta.choices[0].message.content
         
     except Exception as e:
         print(f'❌ Error generando respuesta: {e}')
-        return f"¡Hola {nombre_cliente}! Disculpá, tuve un inconveniente. ¿Podés repetirme tu consulta?"
+        return f"Hola {nombre_cliente}, disculpá, tuve un inconveniente. ¿Podés repetirme tu consulta?"
 
 # ============== WEBHOOK ==============
 
@@ -662,12 +672,33 @@ def recibir_mensaje():
         print(f'❌ Error webhook: {e}')
         return jsonify({'status': 'error'}), 500
 
+def obtener_nombre_cianbox(telefono):
+    """Busca nombre completo en Cianbox por teléfono"""
+    if not CIANBOX_DISPONIBLE:
+        return None
+    try:
+        tel_limpio = telefono.replace('+', '').replace(' ', '').replace('-', '')
+        if tel_limpio.startswith('549'):
+            tel_limpio = tel_limpio[3:]
+        elif tel_limpio.startswith('54'):
+            tel_limpio = tel_limpio[2:]
+        
+        cliente = buscar_cliente_por_celular(tel_limpio)
+        if cliente:
+            return cliente.get('razon_social') or cliente.get('nombre')
+        return None
+    except:
+        return None
+
 def procesar_mensaje(remitente, texto, value):
     try:
         contactos = value.get('contacts', [{}])
-        nombre = contactos[0].get('profile', {}).get('name', 'Cliente') if contactos else 'Cliente'
+        nombre_wa = contactos[0].get('profile', {}).get('name', 'Cliente') if contactos else 'Cliente'
         
-        print(f'👤 Cliente: {nombre}')
+        nombre_cianbox = obtener_nombre_cianbox(remitente)
+        nombre = nombre_cianbox if nombre_cianbox else nombre_wa
+        
+        print(f'👤 Cliente: {nombre}' + (' (Cianbox)' if nombre_cianbox else ' (WhatsApp)'))
         print(f'📝 Texto: {texto}')
         
         if db is None:
@@ -810,6 +841,8 @@ def health():
 if __name__ == '__main__':
     limpiar_pdfs_viejos()
     conectar_mongodb()
+    if CIANBOX_DISPONIBLE:
+        inicializar_cianbox()
     port = int(os.environ.get('PORT', 3000))
     print(f'🚀 Ovidio corriendo en puerto {port}')
     app.run(host='0.0.0.0', port=port, debug=False)
