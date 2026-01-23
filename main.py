@@ -13,13 +13,6 @@ from reportlab.lib.units import mm
 import uuid
 import glob
 
-try:
-    from services.cianbox_service import buscar_cliente_por_celular, inicializar_cianbox
-    CIANBOX_DISPONIBLE = True
-except ImportError:
-    CIANBOX_DISPONIBLE = False
-    print('⚠️ Servicio Cianbox no disponible')
-
 app = Flask(__name__)
 
 cliente_mongo = None
@@ -229,7 +222,7 @@ def formatear_presupuesto_texto(presupuesto):
 def generar_pdf_presupuesto(presupuesto):
     """Genera el PDF del presupuesto con diseño profesional"""
     try:
-        nombre_archivo = f"presupuesto_{presupuesto['numero']}.pdf"
+        nombre_archivo = f"presupuesto_{presupuesto['numero']}_{uuid.uuid4().hex[:8]}.pdf"
         ruta_archivo = os.path.join(PRESUPUESTOS_DIR, nombre_archivo)
         
         doc = SimpleDocTemplate(ruta_archivo, pagesize=A4,
@@ -463,22 +456,13 @@ def detectar_intencion_compra(texto):
 
 def detectar_quiere_presupuesto(texto):
     """Detecta si el cliente quiere cerrar/confirmar un presupuesto"""
-    texto_lower = texto.lower().strip()
-    
-    # Frases explícitas de presupuesto
-    frases_presupuesto = ['si todo', 'eso es todo', 'nada mas', 'nada más', 'solo eso', 
+    texto_lower = texto.lower()
+    frases = ['si todo', 'eso es todo', 'nada mas', 'nada más', 'solo eso', 'confirmo', 
               'dale presupuesto', 'arma presupuesto', 'haceme presupuesto', 'pasame presupuesto',
-              'quiero presupuesto', 'manda presupuesto', 'enviame presupuesto', 'armalo',
-              'si armalo', 'si por favor', 'dale armalo', 'si dale']
-    
-    for frase in frases_presupuesto:
+              'quiero presupuesto', 'manda presupuesto', 'enviame presupuesto']
+    for frase in frases:
         if frase in texto_lower:
             return True
-    
-    # "si" solo cuando es respuesta a "¿Te armo presupuesto?" o similar
-    if texto_lower in ['si', 'sí', 'dale', 'ok', 'va', 'listo', 'perfecto']:
-        return True
-    
     return False
 
 def extraer_productos_del_mensaje(texto):
@@ -592,8 +576,8 @@ def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, p
             contexto_productos = "\n\n=== PRODUCTOS EN STOCK ===\n"
             for prod in productos_encontrados:
                 info = formatear_producto_para_respuesta(prod)
-                contexto_productos += f"- {info['nombre']}: USD ${info['precio']} + IVA ({info['iva']}%), Stock: {info['stock']}\n"
-            contexto_productos += "===\n"
+                contexto_productos += f"{info['texto']}\n"
+            contexto_productos += "===\nMostrá estos productos al cliente con precios."
         
         contexto_presupuesto = ""
         if presupuesto_texto:
@@ -608,20 +592,12 @@ def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, p
         
         mensajes_sistema = f"""Sos Ovidio, asistente comercial de GRUPO SER, seguridad electrónica en Rosario.
 
-REGLAS OBLIGATORIAS:
-1. Respuestas CORTAS: máximo 2 líneas de WhatsApp
-2. NUNCA incluir links ni URLs de ningún tipo
-3. Precios SIEMPRE en dólares (USD) + IVA
-4. Si hay producto, dar: nombre, precio en USD, UNA característica básica
-5. Terminar preguntando si necesita algo más o si quiere presupuesto
-6. NO uses "che", "boludo"
-7. Cordial y profesional
-
-FORMATO DE RESPUESTA PARA PRODUCTOS:
-"[Producto] cuesta USD $[precio] + IVA ([%]). [Una característica corta]. ¿Necesitás algo más o te armo presupuesto?"
-
-EJEMPLO:
-"El kit AX Pro cuesta USD $85 + IVA (21%). Inalámbrico, ideal para casas. ¿Algo más o te armo presupuesto?"
+REGLAS:
+1. Cordial, profesional, CONCISO (3-4 líneas máximo)
+2. NO uses "che", "boludo"
+3. Precios SIN IVA, aclarar porcentaje UNA vez
+4. Si hay productos en contexto, mostralos directo
+5. NO repitas información ya dicha
 
 Cliente: {nombre_cliente}
 
@@ -637,14 +613,14 @@ Historial:
                 {"role": "user", "content": mensaje_usuario}
             ],
             temperature=0.7,
-            max_tokens=150
+            max_tokens=400
         )
         
         return respuesta.choices[0].message.content
         
     except Exception as e:
         print(f'❌ Error generando respuesta: {e}')
-        return f"Hola {nombre_cliente}, disculpá, tuve un inconveniente. ¿Podés repetirme tu consulta?"
+        return f"¡Hola {nombre_cliente}! Disculpá, tuve un inconveniente. ¿Podés repetirme tu consulta?"
 
 # ============== WEBHOOK ==============
 
@@ -686,53 +662,10 @@ def recibir_mensaje():
         print(f'❌ Error webhook: {e}')
         return jsonify({'status': 'error'}), 500
 
-def obtener_datos_cliente_cianbox(telefono):
-    """Busca el cliente en Cianbox y devuelve sus datos completos"""
-    if not CIANBOX_DISPONIBLE:
-        return None
-    
-    try:
-        tel_limpio = telefono.replace('+', '').replace(' ', '').replace('-', '')
-        if tel_limpio.startswith('549'):
-            tel_limpio = tel_limpio[3:]
-        elif tel_limpio.startswith('54'):
-            tel_limpio = tel_limpio[2:]
-        
-        print(f'🔍 Buscando cliente en Cianbox: {tel_limpio}')
-        cliente_cianbox = buscar_cliente_por_celular(tel_limpio)
-        
-        if cliente_cianbox:
-            nombre_completo = cliente_cianbox.get('razon_social') or cliente_cianbox.get('nombre', '')
-            print(f'✅ Cliente encontrado en Cianbox: {nombre_completo}')
-            return {
-                'nombre_completo': nombre_completo,
-                'cuit': cliente_cianbox.get('numero_documento', ''),
-                'email': cliente_cianbox.get('email', ''),
-                'direccion': cliente_cianbox.get('direccion', ''),
-                'localidad': cliente_cianbox.get('localidad', ''),
-                'vendedor_id': cliente_cianbox.get('vendedor_id'),
-                'vendedor_email': cliente_cianbox.get('vendedor_email', ''),
-                'condicion_iva': cliente_cianbox.get('condicion_iva', ''),
-                'encontrado': True
-            }
-        else:
-            print(f'⚠️ Cliente no encontrado en Cianbox')
-            return {'encontrado': False}
-            
-    except Exception as e:
-        print(f'❌ Error buscando en Cianbox: {e}')
-        return None
-
 def procesar_mensaje(remitente, texto, value):
     try:
         contactos = value.get('contacts', [{}])
-        nombre_whatsapp = contactos[0].get('profile', {}).get('name', 'Cliente') if contactos else 'Cliente'
-        
-        datos_cianbox = obtener_datos_cliente_cianbox(remitente)
-        if datos_cianbox and datos_cianbox.get('encontrado'):
-            nombre = datos_cianbox.get('nombre_completo', nombre_whatsapp)
-        else:
-            nombre = nombre_whatsapp
+        nombre = contactos[0].get('profile', {}).get('name', 'Cliente') if contactos else 'Cliente'
         
         print(f'👤 Cliente: {nombre}')
         print(f'📝 Texto: {texto}')
@@ -877,8 +810,6 @@ def health():
 if __name__ == '__main__':
     limpiar_pdfs_viejos()
     conectar_mongodb()
-    if CIANBOX_DISPONIBLE:
-        inicializar_cianbox()
     port = int(os.environ.get('PORT', 3000))
     print(f'🚀 Ovidio corriendo en puerto {port}')
     app.run(host='0.0.0.0', port=port, debug=False)
