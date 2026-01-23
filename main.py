@@ -1012,36 +1012,75 @@ def verificar_cliente_por_cuit_email(texto, telefono):
         print(f'❌ Error verificando cliente: {e}')
         return None
 
+def vincular_cliente_cianbox(telefono, datos_cianbox):
+    """Vincula el teléfono de WhatsApp con el cliente de Cianbox en MongoDB"""
+    try:
+        if db is None or not datos_cianbox:
+            return
+        
+        db['clientes'].update_one(
+            {'telefono': telefono},
+            {
+                '$set': {
+                    'cianbox_id': datos_cianbox.get('id'),
+                    'cianbox_verificado': True,
+                    'nombre': datos_cianbox.get('razon_social') or datos_cianbox.get('nombre'),
+                    'cuit': datos_cianbox.get('cuit', ''),
+                    'email': datos_cianbox.get('email', ''),
+                    'ubicacion': datos_cianbox.get('localidad', ''),
+                    'actualizado': datetime.utcnow()
+                }
+            },
+            upsert=True
+        )
+        print(f'✅ Cliente vinculado: WhatsApp {telefono} → Cianbox {datos_cianbox.get("razon_social")}')
+        
+    except Exception as e:
+        print(f'❌ Error vinculando cliente: {e}')
+
 def procesar_mensaje(remitente, texto, value):
     try:
         contactos = value.get('contacts', [{}])
         nombre_wa = contactos[0].get('profile', {}).get('name', 'Cliente') if contactos else 'Cliente'
         
-        # Buscar cliente en Cianbox
-        datos_cianbox = obtener_cliente_cianbox(remitente)
-        
-        if datos_cianbox:
-            nombre = datos_cianbox.get('razon_social') or datos_cianbox.get('nombre') or nombre_wa
-            es_cliente_verificado = True
-            print(f'✅ Cliente verificado en Cianbox: {nombre}')
-        else:
-            nombre = nombre_wa
-            es_cliente_verificado = False
-            print(f'⚠️ Cliente NO está en Cianbox: {nombre}')
-        
-        # Si no está verificado, intentar verificar por CUIT o email en el mensaje
-        if not es_cliente_verificado:
-            datos_cianbox = verificar_cliente_por_cuit_email(texto, remitente)
-            if datos_cianbox:
-                nombre = datos_cianbox.get('razon_social') or datos_cianbox.get('nombre') or nombre_wa
-                es_cliente_verificado = True
-                print(f'✅ Cliente verificado por CUIT/email: {nombre}')
-        print(f'📝 Texto: {texto}')
-        
         if db is None:
             conectar_mongodb()
         
-        cliente = db['clientes'].find_one({'telefono': remitente}) if db is not None else None
+        # Primero verificar si ya está vinculado en MongoDB
+        cliente_mongo = db['clientes'].find_one({'telefono': remitente}) if db is not None else None
+        
+        if cliente_mongo and cliente_mongo.get('cianbox_verificado'):
+            # Ya está verificado, usar datos guardados
+            nombre = cliente_mongo.get('nombre') or nombre_wa
+            es_cliente_verificado = True
+            datos_cianbox = {'razon_social': nombre, 'localidad': cliente_mongo.get('ubicacion')}
+            print(f'✅ Cliente ya vinculado en MongoDB: {nombre}')
+        else:
+            # Buscar en Cianbox por celular
+            datos_cianbox = obtener_cliente_cianbox(remitente)
+            
+            if datos_cianbox:
+                nombre = datos_cianbox.get('razon_social') or datos_cianbox.get('nombre') or nombre_wa
+                es_cliente_verificado = True
+                vincular_cliente_cianbox(remitente, datos_cianbox)
+                print(f'✅ Cliente verificado en Cianbox: {nombre}')
+            else:
+                nombre = nombre_wa
+                es_cliente_verificado = False
+                print(f'⚠️ Cliente NO está en Cianbox: {nombre}')
+            
+            # Si no está verificado, intentar verificar por CUIT o email en el mensaje
+            if not es_cliente_verificado:
+                datos_cianbox = verificar_cliente_por_cuit_email(texto, remitente)
+                if datos_cianbox:
+                    nombre = datos_cianbox.get('razon_social') or datos_cianbox.get('nombre') or nombre_wa
+                    es_cliente_verificado = True
+                    vincular_cliente_cianbox(remitente, datos_cianbox)
+                    print(f'✅ Cliente verificado y vinculado por CUIT/email: {nombre}')
+        
+        print(f'📝 Texto: {texto}')
+        
+        cliente = cliente_mongo  # Ya lo buscamos arriba
         historial = cliente.get('conversaciones', []) if cliente else []
         
         # Verificar presupuesto pendiente
@@ -1224,6 +1263,8 @@ def guardar_conversacion(telefono, nombre, mensaje, respuesta):
                 'rubro': '',
                 'ubicacion': '',
                 'estado': 'nuevo',
+                'cianbox_id': None,
+                'cianbox_verificado': False,
                 'conversaciones': [
                     {'rol': 'usuario', 'contenido': mensaje, 'fecha': ahora},
                     {'rol': 'asistente', 'contenido': respuesta, 'fecha': ahora}
