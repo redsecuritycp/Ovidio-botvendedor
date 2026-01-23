@@ -217,86 +217,187 @@ def formatear_presupuesto_texto(presupuesto):
     return "\n".join(lineas)
 
 def generar_pdf_presupuesto(presupuesto):
-    """Genera el PDF del presupuesto y devuelve la URL"""
+    """Genera el PDF del presupuesto con diseño profesional"""
     try:
         nombre_archivo = f"presupuesto_{presupuesto['numero']}_{uuid.uuid4().hex[:8]}.pdf"
         ruta_archivo = os.path.join(PRESUPUESTOS_DIR, nombre_archivo)
         
         doc = SimpleDocTemplate(ruta_archivo, pagesize=A4,
-                                rightMargin=20*mm, leftMargin=20*mm,
-                                topMargin=20*mm, bottomMargin=20*mm)
+                                rightMargin=15*mm, leftMargin=15*mm,
+                                topMargin=15*mm, bottomMargin=15*mm)
         
         elementos = []
         estilos = getSampleStyleSheet()
         
+        # Colores de la marca
+        CYAN_PRIMARIO = colors.HexColor('#00BCD4')
+        CYAN_OSCURO = colors.HexColor('#0097A7')
+        GRIS_OSCURO = colors.HexColor('#37474F')
+        GRIS_CLARO = colors.HexColor('#F5F5F5')
+        
+        # Logo
+        logo_path = os.path.join(os.path.dirname(__file__), 'logo.png')
+        if os.path.exists(logo_path):
+            from reportlab.platypus import Image
+            logo = Image(logo_path, width=50*mm, height=25*mm)
+            logo.hAlign = 'LEFT'
+            elementos.append(logo)
+            elementos.append(Spacer(1, 5*mm))
+        
+        # Línea separadora cyan
+        from reportlab.platypus import HRFlowable
+        elementos.append(HRFlowable(width="100%", thickness=2, color=CYAN_PRIMARIO, spaceAfter=10))
+        
+        # Título PRESUPUESTO
         estilo_titulo = ParagraphStyle(
-            'Titulo',
+            'TituloPres',
             parent=estilos['Heading1'],
-            fontSize=18,
-            spaceAfter=30,
-            alignment=1
+            fontSize=22,
+            textColor=GRIS_OSCURO,
+            spaceAfter=5,
+            fontName='Helvetica-Bold'
         )
+        elementos.append(Paragraph(f"PRESUPUESTO N° {presupuesto['numero']}", estilo_titulo))
         
-        estilo_subtitulo = ParagraphStyle(
-            'Subtitulo',
+        # Fecha y validez en una línea
+        estilo_fecha = ParagraphStyle(
+            'Fecha',
             parent=estilos['Normal'],
-            fontSize=12,
-            spaceAfter=20
+            fontSize=10,
+            textColor=colors.gray,
+            spaceAfter=15
         )
+        fecha_str = presupuesto['creado'].strftime('%d/%m/%Y')
+        elementos.append(Paragraph(f"Fecha: {fecha_str}  |  Válido por: {presupuesto['validez_dias']} días", estilo_fecha))
         
-        elementos.append(Paragraph("GRUPO SER", estilo_titulo))
-        elementos.append(Paragraph("Seguridad Electrónica", estilos['Normal']))
-        elementos.append(Spacer(1, 20))
+        # Caja de datos del cliente
+        estilo_cliente_titulo = ParagraphStyle(
+            'ClienteTitulo',
+            parent=estilos['Normal'],
+            fontSize=11,
+            textColor=CYAN_OSCURO,
+            fontName='Helvetica-Bold',
+            spaceAfter=3
+        )
+        estilo_cliente = ParagraphStyle(
+            'ClienteDatos',
+            parent=estilos['Normal'],
+            fontSize=11,
+            textColor=GRIS_OSCURO,
+            spaceAfter=15
+        )
+        elementos.append(Paragraph("CLIENTE", estilo_cliente_titulo))
+        elementos.append(Paragraph(f"{presupuesto['nombre_cliente']}", estilo_cliente))
         
-        elementos.append(Paragraph(f"<b>PRESUPUESTO N° {presupuesto['numero']}</b>", estilo_subtitulo))
-        elementos.append(Paragraph(f"Fecha: {presupuesto['creado'].strftime('%d/%m/%Y')}", estilos['Normal']))
-        elementos.append(Paragraph(f"Cliente: {presupuesto['nombre_cliente']}", estilos['Normal']))
-        elementos.append(Paragraph(f"Válido por: {presupuesto['validez_dias']} días", estilos['Normal']))
-        elementos.append(Spacer(1, 20))
+        elementos.append(Spacer(1, 5*mm))
         
+        # Tabla de productos con estilo moderno
         datos_tabla = [['Producto', 'Cant.', 'Precio Unit.', 'IVA', 'Subtotal']]
         
         for item in presupuesto['items']:
             iva_porcentaje = item.get('iva', 21)
             subtotal_item = item['precio'] * item['cantidad']
             datos_tabla.append([
-                item['nombre'][:40],
+                item['nombre'][:45],
                 str(item['cantidad']),
                 f"${item['precio']:,.0f}",
                 f"{iva_porcentaje}%",
                 f"${subtotal_item:,.0f}"
             ])
         
-        tabla = Table(datos_tabla, colWidths=[80*mm, 15*mm, 30*mm, 15*mm, 30*mm])
+        tabla = Table(datos_tabla, colWidths=[85*mm, 15*mm, 28*mm, 15*mm, 28*mm])
         tabla.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a365d')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            # Encabezado
+            ('BACKGROUND', (0, 0), (-1, 0), CYAN_PRIMARIO),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTSIZE', (0, 0), (-1, 0), 10),
             ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#f7fafc')),
-            ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
+            ('TOPPADDING', (0, 0), (-1, 0), 12),
+            
+            # Filas de datos
+            ('BACKGROUND', (0, 1), (-1, -1), colors.white),
+            ('TEXTCOLOR', (0, 1), (-1, -1), GRIS_OSCURO),
             ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
             ('FONTSIZE', (0, 1), (-1, -1), 9),
-            ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#e2e8f0')),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 10),
+            ('TOPPADDING', (0, 1), (-1, -1), 10),
+            
+            # Alineación
+            ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
+            ('ALIGN', (0, 1), (0, -1), 'LEFT'),
+            
+            # Bordes sutiles
+            ('LINEBELOW', (0, 0), (-1, 0), 2, CYAN_OSCURO),
+            ('LINEBELOW', (0, 1), (-1, -2), 0.5, colors.HexColor('#E0E0E0')),
+            ('LINEBELOW', (0, -1), (-1, -1), 1, GRIS_OSCURO),
+            
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ]))
         
         elementos.append(tabla)
-        elementos.append(Spacer(1, 20))
+        elementos.append(Spacer(1, 8*mm))
         
-        estilo_total = ParagraphStyle('Total', parent=estilos['Normal'], fontSize=11, alignment=2)
-        elementos.append(Paragraph(f"Subtotal: ${presupuesto['subtotal']:,.0f}", estilo_total))
-        elementos.append(Paragraph(f"IVA: ${presupuesto['iva']:,.0f}", estilo_total))
-        elementos.append(Spacer(1, 10))
+        # Caja de totales a la derecha
+        estilo_total_label = ParagraphStyle(
+            'TotalLabel',
+            parent=estilos['Normal'],
+            fontSize=10,
+            textColor=colors.gray,
+            alignment=2
+        )
+        estilo_total_valor = ParagraphStyle(
+            'TotalValor',
+            parent=estilos['Normal'],
+            fontSize=11,
+            textColor=GRIS_OSCURO,
+            alignment=2,
+            fontName='Helvetica-Bold'
+        )
+        estilo_total_final = ParagraphStyle(
+            'TotalFinal',
+            parent=estilos['Normal'],
+            fontSize=16,
+            textColor=CYAN_OSCURO,
+            alignment=2,
+            fontName='Helvetica-Bold',
+            spaceBefore=5
+        )
         
-        estilo_total_final = ParagraphStyle('TotalFinal', parent=estilos['Normal'], fontSize=14, fontName='Helvetica-Bold', alignment=2)
+        elementos.append(Paragraph(f"Subtotal: ${presupuesto['subtotal']:,.0f}", estilo_total_label))
+        elementos.append(Paragraph(f"IVA: ${presupuesto['iva']:,.0f}", estilo_total_label))
+        elementos.append(Spacer(1, 2*mm))
+        elementos.append(HRFlowable(width="40%", thickness=1, color=CYAN_PRIMARIO, hAlign='RIGHT'))
         elementos.append(Paragraph(f"TOTAL: ${presupuesto['total']:,.0f}", estilo_total_final))
         
-        elementos.append(Spacer(1, 30))
-        estilo_nota = ParagraphStyle('Nota', parent=estilos['Normal'], fontSize=8, textColor=colors.gray)
-        elementos.append(Paragraph("Los precios unitarios están expresados sin IVA. El IVA puede ser 10.5% o 21% según el producto.", estilo_nota))
+        elementos.append(Spacer(1, 15*mm))
+        
+        # Nota al pie
+        estilo_nota = ParagraphStyle(
+            'Nota',
+            parent=estilos['Normal'],
+            fontSize=8,
+            textColor=colors.gray,
+            alignment=0
+        )
+        elementos.append(Paragraph("• Los precios unitarios están expresados sin IVA.", estilo_nota))
+        elementos.append(Paragraph("• El porcentaje de IVA puede ser 10.5% o 21% según el producto.", estilo_nota))
+        elementos.append(Paragraph("• Este presupuesto no constituye una factura.", estilo_nota))
+        
+        elementos.append(Spacer(1, 10*mm))
+        
+        # Pie con contacto
+        elementos.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#E0E0E0')))
+        estilo_pie = ParagraphStyle(
+            'Pie',
+            parent=estilos['Normal'],
+            fontSize=9,
+            textColor=CYAN_OSCURO,
+            alignment=1,
+            spaceBefore=10
+        )
+        elementos.append(Paragraph("GRUPO SER - Seguridad Electrónica | www.seguridadrosario.com", estilo_pie))
         
         doc.build(elementos)
         
