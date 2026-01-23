@@ -463,13 +463,22 @@ def detectar_intencion_compra(texto):
 
 def detectar_quiere_presupuesto(texto):
     """Detecta si el cliente quiere cerrar/confirmar un presupuesto"""
-    texto_lower = texto.lower()
-    frases = ['si todo', 'eso es todo', 'nada mas', 'nada más', 'solo eso', 'confirmo', 
+    texto_lower = texto.lower().strip()
+    
+    # Frases explícitas de presupuesto
+    frases_presupuesto = ['si todo', 'eso es todo', 'nada mas', 'nada más', 'solo eso', 
               'dale presupuesto', 'arma presupuesto', 'haceme presupuesto', 'pasame presupuesto',
-              'quiero presupuesto', 'manda presupuesto', 'enviame presupuesto']
-    for frase in frases:
+              'quiero presupuesto', 'manda presupuesto', 'enviame presupuesto', 'armalo',
+              'si armalo', 'si por favor', 'dale armalo', 'si dale']
+    
+    for frase in frases_presupuesto:
         if frase in texto_lower:
             return True
+    
+    # "si" solo cuando es respuesta a "¿Te armo presupuesto?" o similar
+    if texto_lower in ['si', 'sí', 'dale', 'ok', 'va', 'listo', 'perfecto']:
+        return True
+    
     return False
 
 def extraer_productos_del_mensaje(texto):
@@ -604,15 +613,15 @@ REGLAS OBLIGATORIAS:
 2. NUNCA incluir links ni URLs de ningún tipo
 3. Precios SIEMPRE en dólares (USD) + IVA
 4. Si hay producto, dar: nombre, precio en USD, UNA característica básica
-5. Terminar preguntando si quiere presupuesto
+5. Terminar preguntando si necesita algo más o si quiere presupuesto
 6. NO uses "che", "boludo"
 7. Cordial y profesional
 
 FORMATO DE RESPUESTA PARA PRODUCTOS:
-"[Producto] cuesta USD $[precio] + IVA ([%]). [Una característica corta]. ¿Te armo presupuesto?"
+"[Producto] cuesta USD $[precio] + IVA ([%]). [Una característica corta]. ¿Necesitás algo más o te armo presupuesto?"
 
 EJEMPLO:
-"El kit AX Pro cuesta USD $85 + IVA (21%). Inalámbrico, ideal para casas. ¿Te armo presupuesto?"
+"El kit AX Pro cuesta USD $85 + IVA (21%). Inalámbrico, ideal para casas. ¿Algo más o te armo presupuesto?"
 
 Cliente: {nombre_cliente}
 
