@@ -441,7 +441,7 @@ def extraer_datos_cliente(mensaje, cliente):
             
             if cliente_cianbox:
                 print(f'✅ Cliente vinculado por email: {cliente_cianbox.get("razon_social")}')
-                if db:
+                if db is not None:
                     db['clientes'].update_one(
                         {'telefono': cliente.get('telefono')},
                         {'$set': {
@@ -461,7 +461,7 @@ def extraer_datos_cliente(mensaje, cliente):
         
         # Guardar email si no lo tenía
         if not cliente.get('email'):
-            if db:
+            if db is not None:
                 db['clientes'].update_one(
                     {'telefono': cliente.get('telefono')},
                     {'$set': {'email': email_encontrado, 'actualizado': datetime.utcnow()}}
