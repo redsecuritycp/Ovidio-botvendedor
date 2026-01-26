@@ -380,3 +380,83 @@ def inicializar_cianbox():
     else:
         print('❌ Cianbox: No se pudo conectar')
         return False
+
+
+def obtener_historial_pagos(cliente_id):
+    """
+    Obtiene el historial de pagos/facturas de un cliente desde Cianbox.
+    Útil para evaluar comportamiento de pago.
+    """
+    if not cliente_id:
+        return None
+    
+    print(f'🔍 Cianbox: Obteniendo historial de pagos del cliente {cliente_id}')
+    
+    data = _hacer_request('comprobantes', {'cliente_id': cliente_id, 'limit': 20})
+    
+    if data and data.get('body'):
+        comprobantes = data['body']
+        
+        total_facturas = 0
+        total_pagado = 0
+        facturas_pendientes = 0
+        monto_pendiente = 0
+        ultima_compra = None
+        
+        for comp in comprobantes:
+            tipo = comp.get('tipo', '')
+            total = comp.get('total', 0) or 0
+            saldo = comp.get('saldo', 0) or 0
+            fecha = comp.get('fecha')
+            
+            if 'FAC' in tipo.upper() or 'FACTURA' in tipo.upper():
+                total_facturas += 1
+                total_pagado += (total - saldo)
+                
+                if saldo > 0:
+                    facturas_pendientes += 1
+                    monto_pendiente += saldo
+                
+                if not ultima_compra or fecha > ultima_compra:
+                    ultima_compra = fecha
+        
+        # Calcular score de pago (0-100)
+        if total_facturas > 0:
+            porcentaje_pagado = (total_pagado / (total_pagado + monto_pendiente)) * 100 if (total_pagado + monto_pendiente) > 0 else 100
+            score = int(porcentaje_pagado)
+        else:
+            score = 50  # Sin historial, score neutro
+        
+        resultado = {
+            'total_facturas': total_facturas,
+            'facturas_pendientes': facturas_pendientes,
+            'monto_pendiente': monto_pendiente,
+            'ultima_compra': ultima_compra,
+            'score_pago': score,
+            'perfil': 'excelente' if score >= 90 else 'bueno' if score >= 70 else 'regular' if score >= 50 else 'riesgoso'
+        }
+        
+        print(f'✅ Historial de pagos: {resultado}')
+        return resultado
+    
+    return None
+
+
+def obtener_saldo_cliente(cliente_id):
+    """
+    Obtiene el saldo de cuenta corriente del cliente.
+    """
+    if not cliente_id:
+        return None
+    
+    data = _hacer_request(f'clientes/{cliente_id}')
+    
+    if data and data.get('body'):
+        cliente = data['body']
+        return {
+            'saldo': cliente.get('saldo', 0),
+            'tiene_cuenta_corriente': cliente.get('ctacte', False),
+            'limite_credito': cliente.get('limite_credito', 0)
+        }
+    
+    return None

@@ -14,12 +14,13 @@ import uuid
 import glob
 import threading
 import time as time_module
+import random
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 try:
-    from services.cianbox_service import buscar_cliente_por_celular, inicializar_cianbox
+    from services.cianbox_service import buscar_cliente_por_celular, inicializar_cianbox, obtener_historial_pagos, obtener_saldo_cliente, obtener_productos
     CIANBOX_DISPONIBLE = True
 except ImportError:
     CIANBOX_DISPONIBLE = False
@@ -263,11 +264,110 @@ def cron_sincronizacion_cianbox():
         print('⏰ Cron: Ejecutando sincronización diaria de Cianbox...')
         sincronizar_clientes_cianbox()
 
+
+def cron_seguimientos_diarios():
+    """
+    Ejecuta seguimientos diarios: 7 días sin actividad y presupuestos por vencer.
+    Se ejecuta todos los días a las 10:00 AM Argentina.
+    """
+    while True:
+        # Calcular segundos hasta las 10:00 AM del día siguiente
+        ahora = datetime.utcnow()
+        # Argentina es UTC-3, así que 10:00 AR = 13:00 UTC
+        proxima_ejecucion = ahora.replace(hour=13, minute=0, second=0, microsecond=0)
+        if ahora.hour >= 13:
+            proxima_ejecucion += timedelta(days=1)
+        
+        segundos_espera = (proxima_ejecucion - ahora).total_seconds()
+        print(f'⏰ Próximo seguimiento diario en {segundos_espera/3600:.1f} horas')
+        
+        time_module.sleep(segundos_espera)
+        
+        print('⏰ Cron: Ejecutando seguimientos diarios...')
+        ejecutar_seguimiento_7dias()
+        ejecutar_recordatorio_presupuestos()
+
+
+def cron_saludo_lunes():
+    """
+    Envía saludos los lunes entre 11:00 y 14:00 Argentina (horario random).
+    """
+    while True:
+        ahora = datetime.utcnow()
+        
+        # Calcular próximo lunes
+        dias_hasta_lunes = (7 - ahora.weekday()) % 7
+        if dias_hasta_lunes == 0 and ahora.hour >= 17:  # Ya pasó el horario del lunes
+            dias_hasta_lunes = 7
+        
+        # Horario random entre 11:00 y 14:00 Argentina (14:00-17:00 UTC)
+        hora_random = random.randint(14, 16)
+        minuto_random = random.randint(0, 59)
+        
+        proximo_lunes = ahora.replace(hour=hora_random, minute=minuto_random, second=0, microsecond=0)
+        proximo_lunes += timedelta(days=dias_hasta_lunes)
+        
+        segundos_espera = (proximo_lunes - ahora).total_seconds()
+        
+        if segundos_espera > 0:
+            print(f'⏰ Próximo saludo lunes en {segundos_espera/3600:.1f} horas (a las {hora_random-3}:{minuto_random:02d} AR)')
+            time_module.sleep(segundos_espera)
+        
+        # Verificar que sea lunes
+        if datetime.utcnow().weekday() == 0:
+            print('⏰ Cron: Ejecutando saludo de lunes...')
+            ejecutar_saludo_lunes()
+        else:
+            # Si no es lunes (por algún desfase), esperar al próximo
+            time_module.sleep(3600)
+
+
+def cron_cumpleanos():
+    """
+    Verifica cumpleaños todos los días a las 9:00 AM Argentina.
+    """
+    while True:
+        ahora = datetime.utcnow()
+        # 9:00 Argentina = 12:00 UTC
+        proxima_ejecucion = ahora.replace(hour=12, minute=0, second=0, microsecond=0)
+        if ahora.hour >= 12:
+            proxima_ejecucion += timedelta(days=1)
+        
+        segundos_espera = (proxima_ejecucion - ahora).total_seconds()
+        print(f'⏰ Próximo chequeo de cumpleaños en {segundos_espera/3600:.1f} horas')
+        
+        time_module.sleep(segundos_espera)
+        
+        print('⏰ Cron: Verificando cumpleaños...')
+        ejecutar_felicitaciones_cumpleanos()
+
+
+def iniciar_cron_cumpleanos():
+    """Inicia el cron de cumpleaños en un thread separado"""
+    thread = threading.Thread(target=cron_cumpleanos, daemon=True)
+    thread.start()
+    print('✅ Cron de cumpleaños iniciado (9:00 AM)')
+
+
 def iniciar_cron_sincronizacion():
-    """Inicia el cron en un thread separado"""
+    """Inicia el cron de sincronización Cianbox en un thread separado"""
     thread = threading.Thread(target=cron_sincronizacion_cianbox, daemon=True)
     thread.start()
-    print('✅ Cron de sincronización iniciado (cada 24hs)')
+    print('✅ Cron de sincronización Cianbox iniciado (cada 24hs)')
+
+
+def iniciar_cron_seguimientos():
+    """Inicia el cron de seguimientos diarios en un thread separado"""
+    thread = threading.Thread(target=cron_seguimientos_diarios, daemon=True)
+    thread.start()
+    print('✅ Cron de seguimientos diarios iniciado (10:00 AM)')
+
+
+def iniciar_cron_lunes():
+    """Inicia el cron de saludo lunes en un thread separado"""
+    thread = threading.Thread(target=cron_saludo_lunes, daemon=True)
+    thread.start()
+    print('✅ Cron de saludo lunes iniciado (11:00-14:00 AR)')
 
 
 # ============== FUNCIONES DE EMAIL ==============
@@ -510,47 +610,91 @@ def formatear_contexto_cliente(cliente, datos_cianbox=None):
                 partes.append(f"- {evento.get('evento', '')} → Podés preguntar: \"{seguimiento}\"")
             partes.append("===")
     
+    # Agregar marcas preferidas
+    info = {}
     if partes:
-        return "\n".join(partes)
+        info['texto'] = "\n".join(partes)
+    
+    if cliente and cliente.get('marcas_preferidas'):
+        info['marcas'] = cliente.get('marcas_preferidas')
+    
+    # Agregar proveedores conocidos
+    if cliente and cliente.get('proveedores_actuales'):
+        info['proveedores'] = cliente.get('proveedores_actuales')
+    
+    # Agregar comportamiento de pago
+    if cliente and cliente.get('cianbox_id'):
+        comportamiento = obtener_comportamiento_pago(cliente)
+        if comportamiento:
+            info['comportamiento_pago'] = comportamiento
+    
+    # Si hay info, retornar dict. Si no, retornar string vacío para compatibilidad
+    if info:
+        return info
     
     return ""
 
 # ============== FUNCIONES DE STOCK ==============
 
 def buscar_en_api_productos(termino_busqueda):
-    """Busca productos en la API de seguridadrosario.com"""
+    """Busca productos en Cianbox"""
     try:
-        api_base = os.environ.get('API_BASE_URL', 'https://seguridadrosario.com')
-        url = f"{api_base}/api/products/search?q={termino_busqueda}"
+        productos = obtener_productos(termino_busqueda, limite=5)
         
-        headers = {
-            'Accept': 'application/json',
-            'User-Agent': 'Ovidio-Bot/1.0'
-        }
+        if productos:
+            # Convertir formato Cianbox al formato esperado
+            resultado = []
+            for p in productos:
+                resultado.append({
+                    'name': p.get('nombre', ''),
+                    'nombre': p.get('nombre', ''),
+                    'price': p.get('precio', 0),
+                    'precio': p.get('precio', 0),
+                    'stock': p.get('stock', 0),
+                    'cantidad': p.get('stock', 0),
+                    'sku': p.get('codigo', ''),
+                    'codigo': p.get('codigo', ''),
+                    'iva': p.get('iva', 21),
+                    'description': p.get('descripcion', ''),
+                    'descripcion': p.get('descripcion', ''),
+                    'marca': p.get('marca', ''),
+                    'categoria': p.get('categoria', '')
+                })
+            return resultado
         
-        response = requests.get(url, headers=headers, timeout=10)
+        return []
         
-        if response.status_code == 200:
-            datos = response.json()
-            productos = datos if isinstance(datos, list) else datos.get('products', datos.get('data', []))
-            return productos[:5]
-        else:
-            print(f'⚠️ API respondió con status {response.status_code}')
-            return []
-            
     except Exception as e:
-        print(f'❌ Error buscando en API: {e}')
+        print(f'❌ Error buscando productos: {e}')
         return []
 
 def formatear_producto_para_respuesta(producto):
-    """Formatea un producto para mostrar al cliente"""
+    """Formatea un producto para mostrar al cliente, incluyendo spec principal"""
     nombre = producto.get('name', producto.get('nombre', 'Producto'))
     precio = producto.get('price', producto.get('precio', 0))
     stock = producto.get('stock', producto.get('cantidad', 0))
     sku = producto.get('sku', producto.get('codigo', ''))
     iva = producto.get('iva', 21)
+    descripcion = producto.get('description', producto.get('descripcion', ''))
     
     estado_stock = "✅ Disponible" if stock > 0 else "❌ Sin stock"
+    
+    # Extraer spec principal de la descripción
+    spec_principal = ""
+    if descripcion:
+        # Buscar specs comunes
+        specs_keywords = ['MP', 'megapixel', 'canales', 'CH', 'PoE', 'WiFi', 'inalámbrico', 
+                         'IP67', 'IP66', 'infrarrojo', 'IR', 'varifocal', 'motorizado',
+                         'TB', 'GB', 'zonas', 'detectores']
+        desc_lower = descripcion.lower()
+        for keyword in specs_keywords:
+            if keyword.lower() in desc_lower:
+                # Extraer contexto alrededor del keyword
+                idx = desc_lower.find(keyword.lower())
+                start = max(0, idx - 10)
+                end = min(len(descripcion), idx + len(keyword) + 10)
+                spec_principal = descripcion[start:end].strip()
+                break
     
     return {
         'nombre': nombre,
@@ -559,8 +703,347 @@ def formatear_producto_para_respuesta(producto):
         'sku': sku,
         'iva': iva,
         'estado': estado_stock,
-        'texto': f"• {nombre}\n  Precio: ${precio:,.0f} + IVA ({iva}%)\n  Stock: {estado_stock}\n  Código: {sku}"
+        'spec': spec_principal,
+        'texto': f"• {nombre}\n  USD {precio} + IVA | {estado_stock}"
     }
+
+def buscar_alternativas_producto(producto_sin_stock, cantidad=3):
+    """
+    Busca productos alternativos cuando el solicitado no tiene stock.
+    Usa GPT para identificar características clave y busca similares.
+    """
+    try:
+        nombre = producto_sin_stock.get('name', producto_sin_stock.get('nombre', ''))
+        
+        # Extraer categoría/tipo del producto
+        respuesta = cliente_openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """Dado un producto de seguridad electrónica, extraé términos de búsqueda para encontrar alternativas similares.
+                    
+Respondé SOLO con 2-3 palabras clave separadas por coma.
+Ejemplos:
+- "Cámara Domo IP Hikvision 2MP" → "cámara domo IP, 2MP"
+- "DVR Hikvision 8 canales" → "DVR 8 canales"
+- "Sensor de movimiento DSC" → "sensor movimiento, PIR"
+"""
+                },
+                {"role": "user", "content": nombre}
+            ],
+            temperature=0.3,
+            max_tokens=30
+        )
+        
+        terminos = respuesta.choices[0].message.content.strip()
+        
+        # Buscar alternativas
+        alternativas = []
+        for termino in terminos.split(','):
+            termino = termino.strip()
+            if termino:
+                resultados = buscar_en_api_productos(termino)
+                for prod in resultados:
+                    stock = prod.get('stock', prod.get('cantidad', 0))
+                    if stock > 0:  # Solo productos CON stock
+                        alternativas.append(prod)
+                        if len(alternativas) >= cantidad:
+                            break
+            if len(alternativas) >= cantidad:
+                break
+        
+        return alternativas[:cantidad]
+        
+    except Exception as e:
+        print(f'❌ Error buscando alternativas: {e}')
+        return []
+
+
+def formatear_alternativas(alternativas):
+    """Formatea las alternativas para mostrar al cliente"""
+    if not alternativas:
+        return ""
+    
+    texto = "\n\n📦 *Alternativas disponibles:*"
+    for alt in alternativas:
+        nombre = alt.get('name', alt.get('nombre', ''))
+        precio = alt.get('price', alt.get('precio', 0))
+        texto += f"\n• {nombre} - USD {precio} + IVA"
+    
+    return texto
+
+def detectar_marca_preferida(texto):
+    """
+    Detecta si el cliente menciona una marca preferida en su mensaje.
+    """
+    marcas_conocidas = [
+        'hikvision', 'dahua', 'dsc', 'ajax', 'paradox', 'honeywell', 
+        'bosch', 'samsung', 'lg', 'tp-link', 'ubiquiti', 'mikrotik',
+        'intelbras', 'provision', 'epcom', 'syscom', 'zkteco', 'anviz',
+        'commax', 'fermax', 'cdvi', 'hid', 'suprema', 'axis'
+    ]
+    
+    texto_lower = texto.lower()
+    marcas_encontradas = []
+    
+    for marca in marcas_conocidas:
+        if marca in texto_lower:
+            marcas_encontradas.append(marca.capitalize())
+    
+    return marcas_encontradas
+
+
+def actualizar_marcas_cliente(telefono, marcas):
+    """
+    Actualiza las marcas preferidas del cliente en MongoDB.
+    """
+    try:
+        if db is None or not marcas:
+            return
+        
+        db['clientes'].update_one(
+            {'telefono': telefono},
+            {
+                '$addToSet': {'marcas_preferidas': {'$each': marcas}},
+                '$set': {'actualizado': datetime.utcnow()}
+            }
+        )
+        print(f'✅ Marcas actualizadas para {telefono}: {marcas}')
+        
+    except Exception as e:
+        print(f'❌ Error actualizando marcas: {e}')
+
+
+def obtener_marcas_cliente(cliente):
+    """
+    Obtiene las marcas preferidas del cliente.
+    """
+    if not cliente:
+        return []
+    return cliente.get('marcas_preferidas', [])
+
+def detectar_proveedor_mencionado(texto):
+    """
+    Detecta si el cliente menciona un proveedor en su mensaje.
+    """
+    proveedores_conocidos = [
+        'casa munro', 'munro', 'reba', 'newsan', 'garbarino', 'fravega', 
+        'megatone', 'musimundo', 'coto', 'easy', 'sodimac', 'mercadolibre',
+        'electronica gonzalez', 'casa piedra', 'seguridad ya', 'tecnoseguridad',
+        'alarmas rosario', 'syscom', 'intcomex', 'ingram', 'licencias online'
+    ]
+    
+    texto_lower = texto.lower()
+    proveedores_encontrados = []
+    
+    for proveedor in proveedores_conocidos:
+        if proveedor in texto_lower:
+            proveedores_encontrados.append(proveedor.title())
+    
+    # También detectar menciones genéricas
+    if 'otro proveedor' in texto_lower or 'les compro a' in texto_lower or 'compro en' in texto_lower:
+        # Intentar extraer el nombre después de estas frases
+        pass
+    
+    return proveedores_encontrados
+
+
+def actualizar_proveedores_cliente(telefono, proveedores):
+    """
+    Actualiza los proveedores conocidos del cliente en MongoDB.
+    """
+    try:
+        if db is None or not proveedores:
+            return
+        
+        db['clientes'].update_one(
+            {'telefono': telefono},
+            {
+                '$addToSet': {'proveedores_actuales': {'$each': proveedores}},
+                '$set': {'actualizado': datetime.utcnow()}
+            }
+        )
+        print(f'✅ Proveedores actualizados para {telefono}: {proveedores}')
+        
+    except Exception as e:
+        print(f'❌ Error actualizando proveedores: {e}')
+
+
+def detectar_preferencia_promos(texto):
+    """
+    Detecta si el cliente indica preferencia sobre recibir promos/capacitaciones.
+    Retorna: 'si', 'no', o None si no menciona nada.
+    """
+    texto_lower = texto.lower()
+    
+    # Detectar aceptación
+    aceptacion = ['si quiero', 'sí quiero', 'me interesa', 'dale', 'mandame', 'enviame', 
+                  'quiero recibir', 'si a las promo', 'si a promo', 'acepto']
+    for frase in aceptacion:
+        if frase in texto_lower:
+            return 'si'
+    
+    # Detectar rechazo
+    rechazo = ['no quiero', 'no me interesa', 'no gracias', 'no mandes', 'no envies',
+               'sin promo', 'no a las promo', 'no spam']
+    for frase in rechazo:
+        if frase in texto_lower:
+            return 'no'
+    
+    return None
+
+
+def actualizar_preferencia_promos(telefono, preferencia):
+    """
+    Actualiza la preferencia de promos del cliente.
+    """
+    try:
+        if db is None or not preferencia:
+            return
+        
+        db['clientes'].update_one(
+            {'telefono': telefono},
+            {
+                '$set': {
+                    'acepta_promos': preferencia == 'si',
+                    'fecha_preferencia_promos': datetime.utcnow(),
+                    'actualizado': datetime.utcnow()
+                }
+            }
+        )
+        print(f'✅ Preferencia promos para {telefono}: {preferencia}')
+        
+    except Exception as e:
+        print(f'❌ Error actualizando preferencia promos: {e}')
+
+
+def detectar_fecha_nacimiento(texto):
+    """
+    Detecta si el cliente menciona su fecha de nacimiento.
+    """
+    import re
+    
+    # Patrones comunes de fecha
+    patrones = [
+        r'nac[ií]\s*(?:el\s*)?(\d{1,2})[/-](\d{1,2})[/-]?(\d{2,4})?',  # nací el 15/03/1990
+        r'cumplea[ñn]os\s*(?:es\s*)?(?:el\s*)?(\d{1,2})[/-](\d{1,2})',  # cumpleaños es el 15/03
+        r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})',  # 15/03/1990
+        r'(\d{1,2})\s*de\s*(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)',  # 15 de marzo
+    ]
+    
+    meses = {
+        'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4,
+        'mayo': 5, 'junio': 6, 'julio': 7, 'agosto': 8,
+        'septiembre': 9, 'octubre': 10, 'noviembre': 11, 'diciembre': 12
+    }
+    
+    texto_lower = texto.lower()
+    
+    for patron in patrones:
+        match = re.search(patron, texto_lower)
+        if match:
+            grupos = match.groups()
+            try:
+                if len(grupos) >= 2:
+                    dia = int(grupos[0])
+                    
+                    # Si el segundo grupo es un mes en texto
+                    if grupos[1] in meses:
+                        mes = meses[grupos[1]]
+                    else:
+                        mes = int(grupos[1])
+                    
+                    if 1 <= dia <= 31 and 1 <= mes <= 12:
+                        return {'dia': dia, 'mes': mes}
+            except:
+                continue
+    
+    return None
+
+
+def actualizar_fecha_nacimiento(telefono, fecha):
+    """
+    Actualiza la fecha de nacimiento del cliente.
+    """
+    try:
+        if db is None or not fecha:
+            return
+        
+        db['clientes'].update_one(
+            {'telefono': telefono},
+            {
+                '$set': {
+                    'fecha_nacimiento_dia': fecha['dia'],
+                    'fecha_nacimiento_mes': fecha['mes'],
+                    'actualizado': datetime.utcnow()
+                }
+            }
+        )
+        print(f'✅ Fecha nacimiento para {telefono}: {fecha["dia"]}/{fecha["mes"]}')
+        
+    except Exception as e:
+        print(f'❌ Error actualizando fecha nacimiento: {e}')
+
+
+def obtener_comportamiento_pago(cliente):
+    """
+    Obtiene el comportamiento de pago del cliente desde Cianbox.
+    """
+    try:
+        cianbox_id = cliente.get('cianbox_id') if cliente else None
+        
+        if not cianbox_id:
+            return None
+        
+        historial = obtener_historial_pagos(cianbox_id)
+        return historial
+        
+    except Exception as e:
+        print(f'❌ Error obteniendo comportamiento de pago: {e}')
+        return None
+
+
+def ejecutar_felicitaciones_cumpleanos():
+    """
+    Busca clientes que cumplen años hoy y les envía felicitación.
+    """
+    try:
+        if db is None:
+            return
+        
+        hoy = datetime.utcnow()
+        dia_hoy = hoy.day
+        mes_hoy = hoy.month
+        
+        print(f'🎂 Buscando cumpleaños del día {dia_hoy}/{mes_hoy}...')
+        
+        clientes = db['clientes'].find({
+            'fecha_nacimiento_dia': dia_hoy,
+            'fecha_nacimiento_mes': mes_hoy,
+            'felicitado_este_ano': {'$ne': hoy.year}
+        })
+        
+        enviados = 0
+        for cliente in clientes:
+            telefono = cliente.get('telefono')
+            nombre = cliente.get('nombre', 'Cliente')
+            
+            mensaje = f"🎂 ¡Feliz cumpleaños {nombre}! Desde GRUPO SER te deseamos un gran día. Como regalo, tenés 10% OFF en tu próxima compra. ¿Algo más?"
+            
+            resultado = enviar_mensaje_whatsapp(telefono, mensaje)
+            
+            if resultado:
+                db['clientes'].update_one(
+                    {'_id': cliente['_id']},
+                    {'$set': {'felicitado_este_ano': hoy.year}}
+                )
+                enviados += 1
+        
+        print(f'✅ Felicitaciones de cumpleaños: {enviados} enviadas')
+        
+    except Exception as e:
+        print(f'❌ Error en felicitaciones cumpleaños: {e}')
 
 # ============== FUNCIONES DE PRESUPUESTO ==============
 
@@ -1056,36 +1539,38 @@ def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, p
                 rol = "Cliente" if msg.get('rol') == 'usuario' else "Ovidio"
                 historial_texto += f"{rol}: {msg.get('contenido', '')[:100]}\n"
         
-        contexto_cliente = info_cliente if info_cliente else ""
+        # Manejar info_cliente como diccionario o string
+        if isinstance(info_cliente, dict):
+            contexto_cliente = info_cliente.get('texto', '')
+            marcas_cliente = info_cliente.get('marcas', [])
+        else:
+            contexto_cliente = info_cliente if info_cliente else ""
+            marcas_cliente = []
         
         mensajes_sistema = f"""Sos Ovidio, asesor comercial de GRUPO SER (seguridad electrónica, Rosario).
-Vendés SOLO a instaladores/empresas (B2B), no a consumidores finales.
 
-REGLAS ESTRICTAS:
-1. Respuestas de MÁXIMO 2 líneas de WhatsApp
-2. Precios SIEMPRE en USD + IVA (ej: "USD 85 + IVA 21%")
+REGLAS CRÍTICAS - SEGUIR AL PIE DE LA LETRA:
+1. MÁXIMO 2 LÍNEAS de WhatsApp (50-80 caracteres por línea)
+2. Precios SIEMPRE en USD + IVA (ej: "USD 85 + IVA")
 3. NUNCA incluir links ni URLs
-4. Si mostrás un producto, agregar UNA característica breve
-5. Terminar variando entre: "¿Algo más?", "¿Necesitás algo más?", "¿Te interesa algo más?", "¿Qué más necesitás?"
-6. NO usar "che", "boludo"
-7. Ser cordial y MUY humano
+4. UNA sola característica por producto, la más relevante
+5. Terminar con "¿Algo más?" o "¿Te armo presupuesto?"
+6. NO usar "che", "boludo", ni regionalismos
+7. Ser directo, sin rodeos ni explicaciones largas
 
-MEMORIA PERSONAL - MUY IMPORTANTE:
-Si tenés memoria de conversaciones anteriores (familia, salud, planes, trabajo), 
-usala naturalmente para conectar. Ejemplos:
-- Si sabés que su padre estaba enfermo: "¿Cómo sigue tu viejo?"
-- Si sabés que fue a pescar: "¿Qué tal la pesca?"
-- Si tenía una obra: "¿Cómo va esa obra?"
-No fuerces la pregunta, pero si viene al caso, preguntá.
+EJEMPLO CORRECTO:
+"El DVR Hikvision 8ch sale USD 120 + IVA, graba 1080p. ¿Algo más?"
 
-EJEMPLO DE RESPUESTA CON VÍNCULO:
-"¡Hola! El DVR 8ch está USD 95 + IVA. ¿Cómo sigue tu viejo, todo bien?"
+EJEMPLO INCORRECTO (muy largo):
+"Hola! Te cuento que el DVR Hikvision de 8 canales tiene un precio de USD 120 más IVA. Este modelo puede grabar en resolución 1080p y tiene capacidad para un disco duro. ¿Te interesa que te arme un presupuesto formal?"
+
+{f"MARCAS QUE LE GUSTAN AL CLIENTE: {', '.join(marcas_cliente)}" if marcas_cliente else ""}
 
 Cliente: {nombre_cliente}
-{contexto_cliente}
-Historial: {historial_texto if historial_texto else 'Primera conversación'}
+Historial reciente: {historial_texto if historial_texto else 'Primera conversación'}
 {contexto_productos}
-{contexto_presupuesto}"""
+{contexto_presupuesto}
+{f"Info del cliente: {contexto_cliente}" if contexto_cliente else ""}"""
 
         respuesta = cliente_openai.chat.completions.create(
             model="gpt-4",
@@ -1336,22 +1821,52 @@ def procesar_mensaje(remitente, texto, value):
                 print(f'🔍 Términos: {terminos}')
                 
                 productos_sin_stock = []
+                alternativas_encontradas = []
+                
                 for termino in terminos:
                     resultados = buscar_en_api_productos(termino)
                     print(f'🔍 "{termino}": {len(resultados)} resultados')
                     productos_encontrados.extend(resultados)
                     
-                    # Detectar productos sin stock
+                    # Detectar productos sin stock y buscar alternativas
                     for prod in resultados:
                         stock = prod.get('stock', prod.get('cantidad', 0))
                         if stock <= 0:
-                            productos_sin_stock.append(prod.get('name', prod.get('nombre', termino)))
+                            productos_sin_stock.append(prod)
+                            # Buscar alternativas
+                            alts = buscar_alternativas_producto(prod)
+                            alternativas_encontradas.extend(alts)
                 
                 # Si hay productos sin stock, notificar a compras
                 if productos_sin_stock and len(productos_sin_stock) > 0:
-                    historial = cliente.get('conversaciones', []) if cliente else []
+                    historial_conv = cliente.get('conversaciones', []) if cliente else []
                     for prod_sin_stock in productos_sin_stock:
-                        notificar_compras_sin_stock(prod_sin_stock, nombre, remitente, historial)
+                        nombre_prod = prod_sin_stock.get('name', prod_sin_stock.get('nombre', 'Producto'))
+                        notificar_compras_sin_stock(nombre_prod, nombre, remitente, historial_conv)
+                
+                # Detectar marcas mencionadas
+                marcas_detectadas = detectar_marca_preferida(texto)
+                if marcas_detectadas:
+                    actualizar_marcas_cliente(remitente, marcas_detectadas)
+                
+                # Detectar proveedores mencionados
+                proveedores_detectados = detectar_proveedor_mencionado(texto)
+                if proveedores_detectados:
+                    actualizar_proveedores_cliente(remitente, proveedores_detectados)
+                
+                # Detectar preferencia de promos
+                pref_promos = detectar_preferencia_promos(texto)
+                if pref_promos:
+                    actualizar_preferencia_promos(remitente, pref_promos)
+                
+                # Detectar fecha de nacimiento
+                fecha_nac = detectar_fecha_nacimiento(texto)
+                if fecha_nac:
+                    actualizar_fecha_nacimiento(remitente, fecha_nac)
+                
+                # Agregar alternativas a productos encontrados
+                if alternativas_encontradas:
+                    productos_encontrados.extend(alternativas_encontradas)
             
             # Extraer y guardar datos personales de la conversación
             datos_actuales = cliente.get('datos_personales', {}) if cliente else {}
@@ -1453,6 +1968,282 @@ def enviar_mensaje_whatsapp(destinatario, texto):
     except Exception as e:
         print(f'❌ Error enviando mensaje: {e}')
         return None
+
+def enviar_plantilla_whatsapp(destinatario, nombre_plantilla, parametros):
+    """
+    Envía un mensaje usando una plantilla pre-aprobada de WhatsApp.
+    Necesario para mensajes después de 24hs sin interacción.
+    
+    Args:
+        destinatario: Número de teléfono
+        nombre_plantilla: Nombre de la plantilla en Meta (ej: 'seguimiento_7dias')
+        parametros: Lista de strings para las variables {{1}}, {{2}}, etc.
+    """
+    try:
+        url = f"https://graph.facebook.com/v21.0/{os.environ.get('PHONE_NUMBER_ID')}/messages"
+        
+        headers = {
+            'Authorization': f"Bearer {os.environ.get('WHATSAPP_TOKEN')}",
+            'Content-Type': 'application/json'
+        }
+        
+        # Construir componentes con parámetros
+        components = []
+        if parametros and len(parametros) > 0:
+            body_parameters = [{"type": "text", "text": str(p)} for p in parametros]
+            components.append({
+                "type": "body",
+                "parameters": body_parameters
+            })
+        
+        payload = {
+            'messaging_product': 'whatsapp',
+            'to': destinatario,
+            'type': 'template',
+            'template': {
+                'name': nombre_plantilla,
+                'language': {'code': 'es_AR'},
+                'components': components
+            }
+        }
+        
+        response = requests.post(url, headers=headers, json=payload)
+        
+        if response.status_code == 200:
+            print(f'✅ Plantilla {nombre_plantilla} enviada a {destinatario}')
+            return response.json()
+        else:
+            print(f'❌ Error enviando plantilla: {response.status_code} - {response.text}')
+            return None
+    
+    except Exception as e:
+        print(f'❌ Error enviando plantilla: {e}')
+        return None
+
+
+def obtener_tema_ultima_consulta(conversaciones):
+    """
+    Extrae el tema principal de la última consulta del cliente usando GPT.
+    """
+    try:
+        if not conversaciones or len(conversaciones) == 0:
+            return "tu consulta"
+        
+        # Tomar últimos mensajes del usuario
+        mensajes_usuario = [c.get('contenido', '') for c in conversaciones[-10:] if c.get('rol') == 'usuario']
+        
+        if not mensajes_usuario:
+            return "tu consulta"
+        
+        texto = " | ".join(mensajes_usuario[-5:])
+        
+        respuesta = cliente_openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Extraé el tema principal de consulta en máximo 5 palabras. Ejemplos: 'cámaras para la obra', 'alarma para el local', 'DVR 8 canales'. Si no hay tema claro, respondé 'tu consulta'."
+                },
+                {"role": "user", "content": texto}
+            ],
+            temperature=0.3,
+            max_tokens=20
+        )
+        
+        tema = respuesta.choices[0].message.content.strip()
+        return tema if tema else "tu consulta"
+        
+    except Exception as e:
+        print(f'❌ Error extrayendo tema: {e}')
+        return "tu consulta"
+
+
+def obtener_mensaje_personal_lunes(cliente):
+    """
+    Genera un mensaje personalizado para el saludo del lunes basado en la memoria del cliente.
+    """
+    try:
+        datos_personales = cliente.get('datos_personales', {})
+        memoria = datos_personales.get('memoria_conversaciones', [])
+        
+        contexto = ""
+        
+        if datos_personales:
+            if datos_personales.get('familia'):
+                contexto += f"Familia: {datos_personales.get('familia')}. "
+            if datos_personales.get('hobbies'):
+                contexto += f"Hobbies: {datos_personales.get('hobbies')}. "
+            if datos_personales.get('salud'):
+                contexto += f"Salud: {datos_personales.get('salud')}. "
+            if datos_personales.get('planes'):
+                contexto += f"Planes: {datos_personales.get('planes')}. "
+        
+        if memoria and len(memoria) > 0:
+            ultimos = memoria[-3:]
+            for m in ultimos:
+                contexto += f"{m.get('evento', '')}. "
+        
+        if not contexto.strip():
+            return "¿Cómo estuvo el finde?"
+        
+        respuesta = cliente_openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """Generá UNA pregunta corta y cálida para un cliente basándote en lo que sabés de él.
+                    
+Ejemplos:
+- Si mencionó pesca → "¿Cómo te fue en la pesca?"
+- Si tiene mamá enferma → "¿Cómo sigue tu mamá?"
+- Si iba a viajar → "¿Qué tal el viaje?"
+- Si no hay nada específico → "¿Cómo estuvo el finde?"
+
+Máximo 8 palabras. Solo la pregunta, sin "Hola" ni introducción."""
+                },
+                {"role": "user", "content": f"Contexto del cliente: {contexto}"}
+            ],
+            temperature=0.7,
+            max_tokens=30
+        )
+        
+        mensaje = respuesta.choices[0].message.content.strip()
+        return mensaje if mensaje else "¿Cómo estuvo el finde?"
+        
+    except Exception as e:
+        print(f'❌ Error generando mensaje personal: {e}')
+        return "¿Cómo estuvo el finde?"
+
+
+def ejecutar_seguimiento_7dias():
+    """
+    Busca clientes que no interactuaron en 7 días y les envía seguimiento.
+    """
+    try:
+        if db is None:
+            return
+        
+        print('🔍 Buscando clientes para seguimiento 7 días...')
+        
+        hace_7_dias = datetime.utcnow() - timedelta(days=7)
+        hace_8_dias = datetime.utcnow() - timedelta(days=8)
+        
+        # Clientes con última actividad entre 7 y 8 días (para no repetir)
+        clientes = db['clientes'].find({
+            'actualizado': {'$gte': hace_8_dias, '$lte': hace_7_dias},
+            'seguimiento_enviado': {'$ne': True}
+        })
+        
+        enviados = 0
+        for cliente in clientes:
+            telefono = cliente.get('telefono')
+            nombre = cliente.get('nombre', 'Cliente')
+            conversaciones = cliente.get('conversaciones', [])
+            
+            tema = obtener_tema_ultima_consulta(conversaciones)
+            
+            # Enviar plantilla
+            resultado = enviar_plantilla_whatsapp(telefono, 'seguimiento_7dias', [nombre, tema])
+            
+            if resultado:
+                # Marcar como enviado
+                db['clientes'].update_one(
+                    {'_id': cliente['_id']},
+                    {'$set': {'seguimiento_enviado': True, 'fecha_seguimiento': datetime.utcnow()}}
+                )
+                enviados += 1
+        
+        print(f'✅ Seguimiento 7 días: {enviados} mensajes enviados')
+        
+    except Exception as e:
+        print(f'❌ Error en seguimiento 7 días: {e}')
+
+
+def ejecutar_saludo_lunes():
+    """
+    Envía saludo personalizado los lunes a clientes activos.
+    """
+    try:
+        if db is None:
+            return
+        
+        print('🔍 Preparando saludos de lunes...')
+        
+        # Clientes con actividad en últimos 30 días
+        hace_30_dias = datetime.utcnow() - timedelta(days=30)
+        
+        clientes = db['clientes'].find({
+            'actualizado': {'$gte': hace_30_dias},
+            'cianbox_verificado': True  # Solo clientes verificados
+        })
+        
+        enviados = 0
+        for cliente in clientes:
+            telefono = cliente.get('telefono')
+            nombre = cliente.get('nombre', 'Cliente')
+            
+            mensaje_personal = obtener_mensaje_personal_lunes(cliente)
+            
+            # Enviar plantilla
+            resultado = enviar_plantilla_whatsapp(telefono, 'saludo_lunes', [nombre, mensaje_personal])
+            
+            if resultado:
+                enviados += 1
+        
+        print(f'✅ Saludo lunes: {enviados} mensajes enviados')
+        
+    except Exception as e:
+        print(f'❌ Error en saludo lunes: {e}')
+
+
+def ejecutar_recordatorio_presupuestos():
+    """
+    Envía recordatorio de presupuestos que vencen en 3 días.
+    """
+    try:
+        if db is None:
+            return
+        
+        print('🔍 Buscando presupuestos por vencer...')
+        
+        # Presupuestos que vencen en 3 días
+        ahora = datetime.utcnow()
+        
+        presupuestos = db['presupuestos'].find({
+            'estado': {'$in': ['pendiente_confirmacion', 'enviado']},
+            'recordatorio_enviado': {'$ne': True}
+        })
+        
+        enviados = 0
+        for pres in presupuestos:
+            fecha_creacion = pres.get('creado')
+            validez = pres.get('validez_dias', 15)
+            fecha_vencimiento = fecha_creacion + timedelta(days=validez)
+            dias_restantes = (fecha_vencimiento - ahora).days
+            
+            # Enviar recordatorio si vence en 3 días o menos
+            if 0 < dias_restantes <= 3:
+                telefono = pres.get('telefono')
+                nombre = pres.get('nombre_cliente', 'Cliente')
+                numero = pres.get('numero')
+                
+                resultado = enviar_plantilla_whatsapp(
+                    telefono, 
+                    'recordatorio_presupuesto', 
+                    [nombre, str(numero), str(dias_restantes)]
+                )
+                
+                if resultado:
+                    db['presupuestos'].update_one(
+                        {'_id': pres['_id']},
+                        {'$set': {'recordatorio_enviado': True}}
+                    )
+                    enviados += 1
+        
+        print(f'✅ Recordatorio presupuestos: {enviados} mensajes enviados')
+        
+    except Exception as e:
+        print(f'❌ Error en recordatorio presupuestos: {e}')
 
 def guardar_conversacion(telefono, nombre, mensaje, respuesta):
     try:
@@ -1556,8 +2347,11 @@ if __name__ == '__main__':
                 sincronizar_clientes_cianbox()
             else:
                 print(f'📦 Caché con {cache_count} clientes de Cianbox')
-            # Iniciar cron de sincronización automática cada 24hs
+            # Iniciar todos los crons
             iniciar_cron_sincronizacion()
+            iniciar_cron_seguimientos()
+            iniciar_cron_lunes()
+            iniciar_cron_cumpleanos()
     port = int(os.environ.get('PORT', 3000))
     print(f'🚀 Ovidio corriendo en puerto {port}')
     app.run(host='0.0.0.0', port=port, debug=False)
