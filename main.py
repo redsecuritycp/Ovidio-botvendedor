@@ -1518,7 +1518,7 @@ REGLAS:
         traceback.print_exc()
         return []
 
-def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, productos_encontrados=None, presupuesto_texto=None, info_cliente=None):
+def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, productos_encontrados=None, presupuesto_texto=None, info_cliente=None, cliente_mongo=None, es_verificado=True):
     try:
         contexto_productos = ""
         if productos_encontrados and len(productos_encontrados) > 0:
@@ -1539,38 +1539,77 @@ def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, p
                 rol = "Cliente" if msg.get('rol') == 'usuario' else "Ovidio"
                 historial_texto += f"{rol}: {msg.get('contenido', '')[:100]}\n"
         
-        # Manejar info_cliente como diccionario o string
+        # Manejar info_cliente
         if isinstance(info_cliente, dict):
             contexto_cliente = info_cliente.get('texto', '')
             marcas_cliente = info_cliente.get('marcas', [])
+            proveedores_cliente = info_cliente.get('proveedores', [])
+            comportamiento = info_cliente.get('comportamiento_pago', {})
         else:
             contexto_cliente = info_cliente if info_cliente else ""
             marcas_cliente = []
+            proveedores_cliente = []
+            comportamiento = {}
+        
+        # Determinar tipo de saludo
+        es_primera_vez = not historial or len(historial) == 0
+        es_primer_mensaje_dia = True
+        
+        if historial and len(historial) > 0:
+            ultimo_msg = historial[-1]
+            fecha_ultimo = ultimo_msg.get('fecha')
+            if fecha_ultimo:
+                fecha_hoy = datetime.utcnow().date()
+                if hasattr(fecha_ultimo, 'date'):
+                    es_primer_mensaje_dia = fecha_ultimo.date() < fecha_hoy
+                else:
+                    es_primer_mensaje_dia = True
+        
+        # Instrucción de saludo según contexto
+        if es_primera_vez:
+            instruccion_saludo = f"""PRIMERA VEZ - PRESENTATE:
+"¡Hola {nombre_cliente}! Soy Ovidio, asesor comercial de GRUPO SER. ¿En qué puedo ayudarte?"
+Esta presentación es UNA SOLA VEZ."""
+        elif es_primer_mensaje_dia:
+            instruccion_saludo = f"""NUEVO DÍA:
+"¡Hola {nombre_cliente}! ¿En qué puedo ayudarte hoy?"
+NO te presentes, ya te conoce."""
+        else:
+            instruccion_saludo = """MISMO DÍA - NO SALUDES:
+Continuá la conversación directamente, sin saludar."""
+        
+        # Info de comportamiento de pago
+        info_pago = ""
+        if comportamiento and comportamiento.get('perfil'):
+            perfil = comportamiento.get('perfil')
+            if perfil == 'excelente':
+                info_pago = "CLIENTE EXCELENTE PAGADOR - Podés ofrecer cuenta corriente."
+            elif perfil == 'riesgoso':
+                info_pago = "CLIENTE CON DEUDA - Solo contado o transferencia anticipada."
         
         mensajes_sistema = f"""Sos Ovidio, asesor comercial de GRUPO SER (seguridad electrónica, Rosario).
 
-REGLAS CRÍTICAS - SEGUIR AL PIE DE LA LETRA:
+{instruccion_saludo}
+
+REGLAS CRÍTICAS:
 1. MÁXIMO 2 LÍNEAS de WhatsApp (50-80 caracteres por línea)
 2. Precios SIEMPRE en USD + IVA (ej: "USD 85 + IVA")
 3. NUNCA incluir links ni URLs
-4. UNA sola característica por producto, la más relevante
-5. Terminar con "¿Algo más?" o "¿Te armo presupuesto?"
+4. UNA sola característica por producto
+5. SIEMPRE terminar con "¿Algo más?" o "¿Te armo presupuesto?"
 6. NO usar "che", "boludo", ni regionalismos
-7. Ser directo, sin rodeos ni explicaciones largas
+7. Ser directo, cordial y profesional
 
-EJEMPLO CORRECTO:
-"El DVR Hikvision 8ch sale USD 120 + IVA, graba 1080p. ¿Algo más?"
+{info_pago}
 
-EJEMPLO INCORRECTO (muy largo):
-"Hola! Te cuento que el DVR Hikvision de 8 canales tiene un precio de USD 120 más IVA. Este modelo puede grabar en resolución 1080p y tiene capacidad para un disco duro. ¿Te interesa que te arme un presupuesto formal?"
-
-{f"MARCAS QUE LE GUSTAN AL CLIENTE: {', '.join(marcas_cliente)}" if marcas_cliente else ""}
+{f"MARCAS PREFERIDAS: {', '.join(marcas_cliente)}" if marcas_cliente else ""}
+{f"PROVEEDORES ACTUALES: {', '.join(proveedores_cliente)}" if proveedores_cliente else ""}
 
 Cliente: {nombre_cliente}
-Historial reciente: {historial_texto if historial_texto else 'Primera conversación'}
+Historial: {historial_texto if historial_texto else 'Primera conversación'}
 {contexto_productos}
 {contexto_presupuesto}
-{f"Info del cliente: {contexto_cliente}" if contexto_cliente else ""}"""
+{f"Info adicional: {contexto_cliente}" if contexto_cliente else ""}"""
 
         respuesta = cliente_openai.chat.completions.create(
             model="gpt-4",
@@ -1877,11 +1916,22 @@ def procesar_mensaje(remitente, texto, value):
             # Generar respuesta con contexto del cliente
             info_cliente = formatear_contexto_cliente(cliente, datos_cianbox if es_cliente_verificado else None)
             
-            # Si NO es cliente verificado y pregunta por precios, pedir que se identifique
-            if not es_cliente_verificado and detectar_intencion_compra(texto):
-                respuesta = f"¡Hola {nombre}! Para pasarte precios necesito verificar tu cuenta. ¿Me pasás tu CUIT o el email con el que estás registrado?"
+            # Si NO es cliente verificado, pedir CUIT (solo la primera vez)
+            ya_pidio_cuit = False
+            if cliente:
+                ya_pidio_cuit = cliente.get('cuit_solicitado', False)
+            
+            if not es_cliente_verificado and not ya_pidio_cuit:
+                # Marcar que ya pedimos CUIT
+                if db is not None:
+                    db['clientes'].update_one(
+                        {'telefono': remitente},
+                        {'$set': {'cuit_solicitado': True, 'actualizado': datetime.utcnow()}},
+                        upsert=True
+                    )
+                respuesta = f"¡Hola {nombre}! Soy Ovidio de GRUPO SER. Para verificar tu cuenta y pasarte precios, ¿me pasás tu CUIT? Es solo por esta vez."
             else:
-                respuesta = generar_respuesta_con_contexto(texto, historial, nombre, productos_encontrados, None, info_cliente)
+                respuesta = generar_respuesta_con_contexto(texto, historial, nombre, productos_encontrados, None, info_cliente, cliente, es_cliente_verificado)
         
         enviar_mensaje_whatsapp(remitente, respuesta)
         guardar_conversacion(remitente, nombre, texto, respuesta)
