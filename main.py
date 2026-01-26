@@ -12,6 +12,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.units import mm
 import uuid
 import glob
+import threading
+import time as time_module
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -82,6 +84,191 @@ def conectar_mongodb():
     except Exception as e:
         print(f'❌ Error MongoDB: {e}')
         return None
+
+# ============== SINCRONIZACIÓN CIANBOX ==============
+
+def sincronizar_clientes_cianbox():
+    """
+    Descarga TODOS los clientes de Cianbox y los guarda en MongoDB.
+    La API de Cianbox no filtra bien, así que guardamos todo localmente.
+    """
+    try:
+        if db is None:
+            print('❌ MongoDB no conectado, no se puede sincronizar')
+            return False
+        
+        from services.cianbox_service import get_token, CIANBOX_BASE_URL
+        import requests
+        
+        token = get_token()
+        if not token:
+            print('❌ No se pudo obtener token de Cianbox')
+            return False
+        
+        print('🔄 Iniciando sincronización de clientes Cianbox...')
+        
+        todos_clientes = []
+        pagina = 1
+        limit = 100
+        
+        while True:
+            response = requests.get(
+                f'{CIANBOX_BASE_URL}/clientes',
+                params={'access_token': token, 'limit': limit, 'page': pagina},
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                print(f'❌ Error en página {pagina}: {response.status_code}')
+                break
+            
+            data = response.json()
+            if data.get('status') != 'ok':
+                print(f'❌ Error en página {pagina}: {data.get("message")}')
+                break
+            
+            clientes = data.get('body', [])
+            if not clientes:
+                break
+            
+            todos_clientes.extend(clientes)
+            print(f'📥 Página {pagina}: {len(clientes)} clientes (total: {len(todos_clientes)})')
+            
+            pagina += 1
+            
+            # Seguridad: máximo 200 páginas
+            if pagina > 200:
+                print('⚠️ Límite de páginas alcanzado')
+                break
+        
+        if not todos_clientes:
+            print('⚠️ No se encontraron clientes en Cianbox')
+            return False
+        
+        # Guardar en MongoDB
+        coleccion = db['clientes_cianbox']
+        
+        # Limpiar colección anterior
+        coleccion.delete_many({})
+        
+        # Insertar todos los clientes
+        for cliente in todos_clientes:
+            celular = cliente.get('celular', '') or ''
+            celular_limpio = ''.join(filter(str.isdigit, celular))
+            email = (cliente.get('email', '') or '').strip().lower()
+            
+            coleccion.insert_one({
+                'cianbox_id': cliente.get('id'),
+                'razon_social': cliente.get('razon'),
+                'cuit': cliente.get('numero_documento'),
+                'celular': celular,
+                'celular_normalizado': celular_limpio,
+                'email': email,
+                'domicilio': cliente.get('domicilio'),
+                'localidad': cliente.get('localidad'),
+                'provincia': cliente.get('provincia'),
+                'telefono': cliente.get('telefono'),
+                'condicion_iva': cliente.get('condicion'),
+                'tiene_cuenta_corriente': cliente.get('ctacte'),
+                'saldo': cliente.get('saldo'),
+                'descuento': cliente.get('descuento'),
+                'listas_precio': cliente.get('listas_precio', [0]),
+                'sincronizado': datetime.utcnow()
+            })
+        
+        # Crear índices para búsqueda rápida
+        coleccion.create_index('celular_normalizado')
+        coleccion.create_index('email')
+        coleccion.create_index('cuit')
+        
+        print(f'✅ Sincronización completada: {len(todos_clientes)} clientes guardados')
+        return True
+        
+    except Exception as e:
+        print(f'❌ Error en sincronización: {e}')
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def buscar_cliente_en_cache(celular=None, email=None, cuit=None):
+    """
+    Busca un cliente en el caché local de MongoDB (clientes_cianbox).
+    Mucho más rápido y confiable que la API de Cianbox.
+    """
+    try:
+        if db is None:
+            return None
+        
+        coleccion = db['clientes_cianbox']
+        cliente = None
+        
+        if celular:
+            celular_limpio = ''.join(filter(str.isdigit, celular))
+            if celular_limpio.startswith('549'):
+                celular_limpio = celular_limpio[3:]
+            elif celular_limpio.startswith('54'):
+                celular_limpio = celular_limpio[2:]
+            
+            # Buscar por celular normalizado (coincidencia parcial)
+            cliente = coleccion.find_one({
+                '$or': [
+                    {'celular_normalizado': celular_limpio},
+                    {'celular_normalizado': {'$regex': f'{celular_limpio}$'}},
+                ]
+            })
+        
+        if not cliente and email:
+            email_limpio = email.strip().lower()
+            cliente = coleccion.find_one({'email': email_limpio})
+        
+        if not cliente and cuit:
+            cuit_limpio = ''.join(filter(str.isdigit, cuit))
+            cliente = coleccion.find_one({'cuit': cuit_limpio})
+        
+        if cliente:
+            print(f'✅ Cliente encontrado en caché: {cliente.get("razon_social")}')
+            return {
+                'id': cliente.get('cianbox_id'),
+                'razon_social': cliente.get('razon_social'),
+                'condicion_iva': cliente.get('condicion_iva'),
+                'cuit': cliente.get('cuit'),
+                'domicilio': cliente.get('domicilio'),
+                'localidad': cliente.get('localidad'),
+                'provincia': cliente.get('provincia'),
+                'telefono': cliente.get('telefono'),
+                'celular': cliente.get('celular'),
+                'email': cliente.get('email'),
+                'tiene_cuenta_corriente': cliente.get('tiene_cuenta_corriente'),
+                'saldo': cliente.get('saldo'),
+                'descuento': cliente.get('descuento'),
+                'listas_precio': cliente.get('listas_precio', [0])
+            }
+        
+        return None
+        
+    except Exception as e:
+        print(f'❌ Error buscando en caché: {e}')
+        return None
+
+# ============== CRON AUTOMÁTICO ==============
+
+def cron_sincronizacion_cianbox():
+    """
+    Ejecuta sincronización de Cianbox cada 24 horas automáticamente.
+    """
+    while True:
+        # Esperar 24 horas (86400 segundos)
+        time_module.sleep(86400)
+        print('⏰ Cron: Ejecutando sincronización diaria de Cianbox...')
+        sincronizar_clientes_cianbox()
+
+def iniciar_cron_sincronizacion():
+    """Inicia el cron en un thread separado"""
+    thread = threading.Thread(target=cron_sincronizacion_cianbox, daemon=True)
+    thread.start()
+    print('✅ Cron de sincronización iniciado (cada 24hs)')
+
 
 # ============== FUNCIONES DE EMAIL ==============
 
@@ -957,60 +1144,69 @@ def recibir_mensaje():
         return jsonify({'status': 'error'}), 500
 
 def obtener_cliente_cianbox(telefono):
-    """Busca cliente completo en Cianbox por teléfono"""
+    """
+    Busca cliente primero en caché MongoDB, luego en API Cianbox si no encuentra.
+    """
     if not CIANBOX_DISPONIBLE:
-        print('⚠️ Cianbox no disponible')
         return None
+    
     try:
-        tel_limpio = telefono.replace('+', '').replace(' ', '').replace('-', '')
-        if tel_limpio.startswith('549'):
-            tel_limpio = tel_limpio[3:]
-        elif tel_limpio.startswith('54'):
-            tel_limpio = tel_limpio[2:]
-        
-        print(f'🔍 Buscando en Cianbox: {tel_limpio}')
-        cliente = buscar_cliente_por_celular(tel_limpio)
+        # Primero buscar en caché local (mucho más rápido y confiable)
+        cliente = buscar_cliente_en_cache(celular=telefono)
         if cliente:
-            print(f'✅ Cianbox encontró: {cliente.get("razon_social")}')
             return cliente
-        print(f'⚠️ Cianbox: No se encontró cliente con celular {tel_limpio}')
-        return None
+        
+        # Si no está en caché, buscar en API (por si es cliente nuevo)
+        print(f'⚠️ Cliente no en caché, buscando en API Cianbox...')
+        cliente = buscar_cliente_por_celular(telefono)
+        return cliente
+        
     except Exception as e:
-        print(f'❌ Error buscando en Cianbox: {e}')
+        print(f'❌ Error obteniendo cliente Cianbox: {e}')
         return None
 
 def verificar_cliente_por_cuit_email(texto, telefono):
-    """Intenta verificar cliente por CUIT o email mencionado en el mensaje"""
-    try:
-        if not CIANBOX_DISPONIBLE:
-            return None
+    """
+    Intenta verificar un cliente por CUIT o email mencionado en el mensaje.
+    Busca primero en caché local, luego en API.
+    """
+    import re
+    
+    # Buscar CUIT en el texto (formato: XX-XXXXXXXX-X o solo números)
+    cuit_pattern = r'\b(\d{2}[-]?\d{8}[-]?\d{1})\b'
+    cuit_match = re.search(cuit_pattern, texto)
+    
+    # Buscar email en el texto
+    email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+    email_match = re.search(email_pattern, texto)
+    
+    if cuit_match:
+        cuit = cuit_match.group(1)
+        print(f'🔍 CUIT detectado en mensaje: {cuit}')
         
-        # Buscar CUIT (11 dígitos)
-        import re
-        cuit_match = re.search(r'\b(\d{2}-?\d{8}-?\d{1})\b', texto)
-        if cuit_match:
-            cuit = cuit_match.group(1).replace('-', '')
-            from services.cianbox_service import buscar_cliente_por_cuit
-            cliente = buscar_cliente_por_cuit(cuit)
-            if cliente:
-                print(f'✅ Cliente verificado por CUIT: {cliente.get("razon_social")}')
-                return cliente
+        # Buscar en caché primero
+        cliente = buscar_cliente_en_cache(cuit=cuit)
+        if cliente:
+            return cliente
         
-        # Buscar email
-        email_match = re.search(r'\b[\w.-]+@[\w.-]+\.\w+\b', texto)
-        if email_match:
-            email = email_match.group(0)
-            from services.cianbox_service import buscar_cliente_por_email
-            cliente = buscar_cliente_por_email(email)
-            if cliente:
-                print(f'✅ Cliente verificado por email: {cliente.get("razon_social")}')
-                return cliente
+        # Si no está en caché, buscar en API
+        from services.cianbox_service import buscar_cliente_por_cuit
+        return buscar_cliente_por_cuit(cuit)
+    
+    if email_match:
+        email = email_match.group(0)
+        print(f'🔍 Email detectado en mensaje: {email}')
         
-        return None
+        # Buscar en caché primero
+        cliente = buscar_cliente_en_cache(email=email)
+        if cliente:
+            return cliente
         
-    except Exception as e:
-        print(f'❌ Error verificando cliente: {e}')
-        return None
+        # Si no está en caché, buscar en API
+        from services.cianbox_service import buscar_cliente_por_email
+        return buscar_cliente_por_email(email)
+    
+    return None
 
 def vincular_cliente_cianbox(telefono, datos_cianbox):
     """Vincula el teléfono de WhatsApp con el cliente de Cianbox en MongoDB"""
@@ -1139,10 +1335,23 @@ def procesar_mensaje(remitente, texto, value):
                 terminos = extraer_productos_del_mensaje(texto)
                 print(f'🔍 Términos: {terminos}')
                 
+                productos_sin_stock = []
                 for termino in terminos:
                     resultados = buscar_en_api_productos(termino)
                     print(f'🔍 "{termino}": {len(resultados)} resultados')
                     productos_encontrados.extend(resultados)
+                    
+                    # Detectar productos sin stock
+                    for prod in resultados:
+                        stock = prod.get('stock', prod.get('cantidad', 0))
+                        if stock <= 0:
+                            productos_sin_stock.append(prod.get('name', prod.get('nombre', termino)))
+                
+                # Si hay productos sin stock, notificar a compras
+                if productos_sin_stock and len(productos_sin_stock) > 0:
+                    historial = cliente.get('conversaciones', []) if cliente else []
+                    for prod_sin_stock in productos_sin_stock:
+                        notificar_compras_sin_stock(prod_sin_stock, nombre, remitente, historial)
             
             # Extraer y guardar datos personales de la conversación
             datos_actuales = cliente.get('datos_personales', {}) if cliente else {}
@@ -1274,6 +1483,11 @@ def guardar_conversacion(telefono, nombre, mensaje, respuesta):
             })
             print(f'👤 Cliente nuevo: {nombre}')
         else:
+            # Solo actualizar nombre si NO está verificado en Cianbox
+            update_fields = {'actualizado': ahora}
+            if not cliente.get('cianbox_verificado'):
+                update_fields['nombre'] = nombre
+            
             clientes.update_one(
                 {'telefono': telefono},
                 {
@@ -1285,10 +1499,10 @@ def guardar_conversacion(telefono, nombre, mensaje, respuesta):
                             ]
                         }
                     },
-                    '$set': {'actualizado': ahora, 'nombre': nombre}
+                    '$set': update_fields
                 }
             )
-            print(f'👤 Cliente actualizado: {nombre}')
+            print(f'👤 Cliente actualizado: {cliente.get("nombre", nombre)}')
             
     except Exception as e:
         print(f'❌ Error guardando: {e}')
@@ -1301,11 +1515,49 @@ def inicio():
 def health():
     return jsonify({'status': 'healthy', 'service': 'ovidio-bot'}), 200
 
+@app.route('/sync-cianbox', methods=['POST'])
+def sync_cianbox_endpoint():
+    """Endpoint para disparar sincronización manual de Cianbox"""
+    resultado = sincronizar_clientes_cianbox()
+    if resultado:
+        return jsonify({'status': 'ok', 'message': 'Sincronización completada'}), 200
+    else:
+        return jsonify({'status': 'error', 'message': 'Error en sincronización'}), 500
+
+@app.route('/sync-cianbox-status')
+def sync_status():
+    """Ver estado de la última sincronización"""
+    try:
+        if db is None:
+            return jsonify({'status': 'error', 'message': 'MongoDB no conectado'}), 500
+        
+        coleccion = db['clientes_cianbox']
+        count = coleccion.count_documents({})
+        ultimo = coleccion.find_one(sort=[('sincronizado', -1)])
+        
+        return jsonify({
+            'status': 'ok',
+            'total_clientes': count,
+            'ultima_sincronizacion': ultimo.get('sincronizado').isoformat() if ultimo else None
+        }), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 if __name__ == '__main__':
     limpiar_pdfs_viejos()
     conectar_mongodb()
     if CIANBOX_DISPONIBLE:
         inicializar_cianbox()
+        # Sincronizar clientes de Cianbox al arrancar (si el caché está vacío)
+        if db is not None:
+            cache_count = db['clientes_cianbox'].count_documents({})
+            if cache_count == 0:
+                print('📥 Caché vacío, sincronizando clientes de Cianbox...')
+                sincronizar_clientes_cianbox()
+            else:
+                print(f'📦 Caché con {cache_count} clientes de Cianbox')
+            # Iniciar cron de sincronización automática cada 24hs
+            iniciar_cron_sincronizacion()
     port = int(os.environ.get('PORT', 3000))
     print(f'🚀 Ovidio corriendo en puerto {port}')
     app.run(host='0.0.0.0', port=port, debug=False)
