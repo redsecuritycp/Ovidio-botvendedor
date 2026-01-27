@@ -1747,9 +1747,9 @@ def recibir_mensaje():
                 texto = mensaje.get('text', {}).get('body', '')
                 
                 if texto:
-                    print(f'\n{"="*50}')
-                    print(f'📩 Mensaje de {remitente}: {texto}')
-                    print(f'{"="*50}')
+                    print(f'\n{"="*50}', flush=True)
+                    print(f'📩 Mensaje de {remitente}: {texto}', flush=True)
+                    print(f'{"="*50}', flush=True)
                     procesar_mensaje(remitente, texto, value)
         
         return jsonify({'status': 'ok'}), 200
@@ -1889,7 +1889,7 @@ def procesar_mensaje(remitente, texto, value):
                     vincular_cliente_cianbox(remitente, datos_cianbox)
                     print(f'✅ Cliente verificado y vinculado por CUIT/email: {nombre}')
         
-        print(f'📝 Texto: {texto}')
+        print(f'📝 Texto: {texto}', flush=True)
         
         cliente = cliente_mongo  # Ya lo buscamos arriba
         historial = cliente.get('conversaciones', []) if cliente else []
@@ -1946,9 +1946,9 @@ def procesar_mensaje(remitente, texto, value):
             productos_encontrados = []
             
             if detectar_intencion_compra(texto):
-                print(f'🔍 Buscando productos...')
+                print(f'🔍 Buscando productos...', flush=True)
                 terminos = extraer_productos_del_mensaje(texto)
-                print(f'🔍 Términos: {terminos}')
+                print(f'🔍 Términos: {terminos}', flush=True)
                 
                 productos_sin_stock = []
                 alternativas_encontradas = []
