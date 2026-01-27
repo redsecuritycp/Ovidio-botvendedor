@@ -1458,6 +1458,85 @@ def detectar_quiere_presupuesto(texto):
     
     return False
 
+def detectar_cantidad_en_mensaje(texto):
+    """Detecta si el cliente menciona una cantidad específica"""
+    try:
+        import re
+        texto_lower = texto.lower()
+        
+        # Patrones de cantidad
+        patrones = [
+            r'(\d+)\s*(?:unidades?|u\.?|piezas?|equipos?)',
+            r'necesito\s*(\d+)',
+            r'quiero\s*(\d+)',
+            r'dame\s*(\d+)',
+            r'pasame\s*(\d+)',
+            r'(\d+)\s*(?:camaras?|dvr|nvr|sensores?|alarmas?)',
+            r'^(\d+)$',  # Solo un número
+        ]
+        
+        for patron in patrones:
+            match = re.search(patron, texto_lower)
+            if match:
+                cantidad = int(match.group(1))
+                if 1 <= cantidad <= 1000:  # Rango razonable
+                    return cantidad
+        
+        return None
+    except:
+        return None
+
+
+def detectar_pregunta_stock(texto):
+    """Detecta si el cliente pregunta específicamente por stock/cantidad disponible"""
+    texto_lower = texto.lower()
+    frases_stock = [
+        'cuantas tenes', 'cuántas tenés', 'cuantos tenes', 'cuántos tenés',
+        'cuantas tienen', 'cuántas tienen', 'cuantos tienen', 'cuántos tienen',
+        'hay stock', 'tienen stock', 'tenes stock', 'tenés stock',
+        'cuantas hay', 'cuántas hay', 'cuantos hay', 'cuántos hay',
+        'disponibilidad', 'disponibles', 'en stock',
+        'cuantas unidades', 'cuántas unidades', 'cuantos unidades'
+    ]
+    
+    for frase in frases_stock:
+        if frase in texto_lower:
+            return True
+    return False
+
+
+def validar_stock_para_cantidad(productos, cantidad_pedida):
+    """
+    Valida si hay stock suficiente para la cantidad pedida.
+    Retorna: (puede_cumplir, stock_disponible, productos_con_stock, productos_sin_stock)
+    """
+    productos_con_stock = []
+    productos_sin_stock = []
+    
+    for prod in productos:
+        stock = prod.get('stock', prod.get('cantidad', 0))
+        nombre = prod.get('name', prod.get('nombre', 'Producto'))
+        
+        if stock >= cantidad_pedida:
+            productos_con_stock.append({
+                'producto': prod,
+                'stock': stock,
+                'cumple': True
+            })
+        elif stock > 0:
+            productos_con_stock.append({
+                'producto': prod,
+                'stock': stock,
+                'cumple': False  # Hay algo pero no alcanza
+            })
+        else:
+            productos_sin_stock.append(prod)
+    
+    puede_cumplir = any(p['cumple'] for p in productos_con_stock)
+    stock_maximo = max([p['stock'] for p in productos_con_stock], default=0)
+    
+    return puede_cumplir, stock_maximo, productos_con_stock, productos_sin_stock
+
 def extraer_productos_del_mensaje(texto):
     try:
         respuesta = cliente_openai.chat.completions.create(
@@ -1564,15 +1643,21 @@ REGLAS:
         traceback.print_exc()
         return []
 
-def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, productos_encontrados=None, presupuesto_texto=None, info_cliente=None, cliente_mongo=None, es_verificado=True):
+def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, productos_encontrados=None, presupuesto_texto=None, info_cliente=None, cliente_mongo=None, es_verificado=True, contexto_stock=None):
     try:
         contexto_productos = ""
         if productos_encontrados and len(productos_encontrados) > 0:
-            contexto_productos = "\n\n=== PRODUCTOS ENCONTRADOS ===\n"
+            contexto_productos = "\n\n=== PRODUCTOS ENCONTRADOS (INFO INTERNA - NO COMPARTIR STOCK) ===\n"
             for prod in productos_encontrados:
                 info = formatear_producto_para_respuesta(prod)
-                contexto_productos += f"- {info['nombre']}: USD {info['precio']} + IVA ({info['iva']}%)\n"
+                stock = info.get('stock', 0)
+                contexto_productos += f"- {info['nombre']}: USD {info['precio']} + IVA ({info['iva']}%) [STOCK INTERNO: {stock}]\n"
             contexto_productos += "===\n"
+        
+        # Contexto especial de stock si hay validación pendiente
+        contexto_stock_texto = ""
+        if contexto_stock:
+            contexto_stock_texto = f"\n\n=== SITUACIÓN DE STOCK ===\n{contexto_stock}\n===\n"
         
         contexto_presupuesto = ""
         if presupuesto_texto:
@@ -1646,44 +1731,26 @@ REGLAS CRÍTICAS:
 
 REGLA DE PRECIOS - MUY IMPORTANTE:
 - SIEMPRE que menciones un producto, incluí el precio en USD + IVA
-- NUNCA menciones un producto sin precio, ni siquiera en recomendaciones
+- NUNCA menciones un producto sin precio
 - Formato: "El [producto] sale USD [precio] + IVA"
-- Si no sabés el precio exacto, buscalo en los productos encontrados
-- Ejemplos correctos:
-  * "El kit Hikvision 4 cámaras sale USD 450 + IVA, incluye NVR y disco."
-  * "Te recomiendo el DVR 8ch a USD 180 + IVA y disco 2TB a USD 85 + IVA."
-- Ejemplos INCORRECTOS (nunca hagas esto):
-  * "Te recomiendo el kit Hikvision ColorVu" (SIN PRECIO = MAL)
-  * "Necesitarás un DVR y disco duro" (SIN PRECIO = MAL)
 
-CIERRE DE MENSAJE - MUY IMPORTANTE:
+=== REGLA DE STOCK - MUY IMPORTANTE ===
+- NUNCA menciones cantidades de stock salvo que el cliente PREGUNTE EXPLÍCITAMENTE "cuántas tenés" o similar
+- Si el cliente pregunta por un producto, da el precio y UNA característica. NO digas "tenemos X unidades"
+- Si el cliente quiere comprar/presupuestar, PREGUNTALE: "¿Cuántas unidades necesitás?"
+- SOLO revelá el stock cuando el cliente ya dijo la cantidad que quiere o preguntó directamente
+- Si hay contexto de stock específico más abajo, seguí esas instrucciones
+===
+
+CIERRE DE MENSAJE:
 - SIEMPRE terminar preguntando si necesita algo más
-- NUNCA ofrecer presupuesto directamente, esperar a que diga "no" o "nada más"
-- VARIAR la frase de cierre para no parecer robot. Ejemplos:
-  * "¿Algo más?"
-  * "¿Necesitás algo más?"
-  * "¿Te busco otra cosa?"
-  * "¿Qué más te muestro?"
-  * "¿Algo más que necesite?"
-- NO repetir la misma frase de cierre en mensajes consecutivos
+- VARIAR la frase: "¿Algo más?", "¿Necesitás algo más?", "¿Te busco otra cosa?"
+- NO repetir la misma frase en mensajes consecutivos
 
-CONOCIMIENTO TÉCNICO - USALO SIEMPRE:
-- CÁMARAS: 2MP=1080p, 4MP=2K, 8MP=4K. Bullet=exterior, Domo=interior/discreto. ColorVu=color de noche. Hikvision=premium, Dahua=calidad/precio, Ajax=inalámbrico premium.
-- DVR/NVR: DVR=cámaras analógicas, NVR=cámaras IP. Canales: 4, 8, 16, 32. 1TB≈7 días con 4 cámaras 2MP.
-- ALARMAS: Ajax=inalámbrica premium, DSC=cableada confiable, Paradox=buena relación precio/calidad.
-- CABLES: UTP Cat5e=100m máx, Cat6=mejor calidad. Coaxil RG59=cámaras analógicas.
-
-COMPORTAMIENTO INTELIGENTE:
-1. SIN STOCK → Ofrecé alternativa similar: "Ese no tenemos, pero el [alternativa] tiene specs similares a USD X + IVA. ¿Te sirve?"
-2. PREGUNTA TÉCNICA → Respondé con conocimiento: "El DVR de 8 canales graba hasta 4 cámaras 4K o 8 cámaras 1080p. ¿Algo más?"
-3. COMPARACIÓN → Compará brevemente: "El Hikvision es premium, el Dahua es similar pero más económico. ¿Cuál preferís?"
-4. COMPLEMENTOS → Sugerí accesorios relacionados: "Para esas cámaras te recomiendo fuente de 12V y baluns. ¿Los agregamos?"
-
-ACCESORIOS COMUNES:
-- Cámaras → Fuentes 12V, Baluns, Conectores BNC, Cable UTP/Coaxil, Cajas de paso
-- DVR/NVR → Disco duro (1TB, 2TB, 4TB), Cable HDMI, Mouse
-- Alarmas → Sirenas, Teclados adicionales, Sensores extra, Batería de respaldo
-- Cercos eléctricos → Aisladores, Alambre, Sirena, Batería
+CONOCIMIENTO TÉCNICO:
+- CÁMARAS: 2MP=1080p, 4MP=2K, 8MP=4K. Bullet=exterior, Domo=interior. ColorVu=color de noche.
+- DVR/NVR: DVR=analógicas, NVR=IP. 1TB≈7 días con 4 cámaras 2MP.
+- ALARMAS: Ajax=inalámbrica premium, DSC=cableada confiable.
 
 {info_pago}
 
@@ -1693,6 +1760,7 @@ ACCESORIOS COMUNES:
 Cliente: {nombre_cliente}
 Historial: {historial_texto if historial_texto else 'Primera conversación'}
 {contexto_productos}
+{contexto_stock_texto}
 {contexto_presupuesto}
 {f"Info adicional: {contexto_cliente}" if contexto_cliente else ""}"""
 
@@ -1938,6 +2006,13 @@ def procesar_mensaje(remitente, texto, value):
         # CASO 3: Consulta normal
         else:
             productos_encontrados = []
+            contexto_stock = None
+            
+            # Detectar si pregunta específicamente por stock
+            pregunta_stock = detectar_pregunta_stock(texto)
+            
+            # Detectar si menciona cantidad
+            cantidad_mencionada = detectar_cantidad_en_mensaje(texto)
             
             if detectar_intencion_compra(texto):
                 print(f'🔍 Buscando productos...')
@@ -1951,22 +2026,60 @@ def procesar_mensaje(remitente, texto, value):
                     resultados = buscar_en_api_productos(termino)
                     print(f'🔍 "{termino}": {len(resultados)} resultados')
                     productos_encontrados.extend(resultados)
+                
+                # Si el cliente preguntó por stock específicamente
+                if pregunta_stock and productos_encontrados:
+                    prod = productos_encontrados[0]
+                    stock_real = prod.get('stock', prod.get('cantidad', 0))
+                    nombre_prod = prod.get('name', prod.get('nombre', 'Producto'))
+                    if stock_real > 0:
+                        contexto_stock = f"El cliente preguntó por stock. RESPONDER: Tenemos {stock_real} unidades de {nombre_prod}. ¿Cuántas necesitás?"
+                    else:
+                        # Buscar alternativas
+                        alts = buscar_alternativas_producto(prod)
+                        if alts:
+                            alternativas_encontradas.extend(alts)
+                            contexto_stock = f"El cliente preguntó por stock de {nombre_prod} pero NO HAY STOCK. Ofrecer alternativas que SÍ tenemos."
+                        else:
+                            contexto_stock = f"El cliente preguntó por {nombre_prod}. NO HAY STOCK ni alternativas. Decir que consultamos con compras y le avisamos."
+                            # Notificar a compras
+                            historial_conv = cliente.get('conversaciones', []) if cliente else []
+                            notificar_compras_sin_stock(nombre_prod, nombre, remitente, historial_conv)
+                
+                # Si el cliente mencionó una cantidad específica
+                elif cantidad_mencionada and productos_encontrados:
+                    print(f'📦 Cliente pidió {cantidad_mencionada} unidades')
+                    puede_cumplir, stock_max, prods_con_stock, prods_sin_stock = validar_stock_para_cantidad(productos_encontrados, cantidad_mencionada)
                     
-                    # Detectar productos sin stock y buscar alternativas
-                    for prod in resultados:
+                    if puede_cumplir:
+                        # Hay stock suficiente
+                        contexto_stock = f"Cliente pidió {cantidad_mencionada} unidades. HAY STOCK SUFICIENTE. Confirmar disponibilidad y preguntar si armamos presupuesto."
+                    elif stock_max > 0:
+                        # Hay algo pero no alcanza
+                        contexto_stock = f"Cliente pidió {cantidad_mencionada} unidades pero SOLO TENEMOS {stock_max}. Decir: 'Tenemos {stock_max} unidades disponibles. ¿Te sirve esa cantidad o buscamos alternativa?'"
+                    else:
+                        # No hay nada
+                        alts = []
+                        for prod in prods_sin_stock[:1]:
+                            alts.extend(buscar_alternativas_producto(prod))
+                        if alts:
+                            alternativas_encontradas.extend(alts)
+                            contexto_stock = f"Cliente pidió {cantidad_mencionada} pero NO HAY STOCK. Ofrecer alternativas disponibles."
+                        else:
+                            contexto_stock = f"Cliente pidió {cantidad_mencionada} pero NO HAY STOCK ni alternativas. Avisar que consultamos con compras."
+                            prod_nombre = productos_encontrados[0].get('name', productos_encontrados[0].get('nombre', 'Producto'))
+                            historial_conv = cliente.get('conversaciones', []) if cliente else []
+                            notificar_compras_sin_stock(prod_nombre, nombre, remitente, historial_conv)
+                
+                # Caso normal: no preguntó stock ni cantidad
+                else:
+                    # Verificar si hay productos sin stock para ofrecer alternativas
+                    for prod in productos_encontrados:
                         stock = prod.get('stock', prod.get('cantidad', 0))
                         if stock <= 0:
                             productos_sin_stock.append(prod)
-                            # Buscar alternativas
                             alts = buscar_alternativas_producto(prod)
                             alternativas_encontradas.extend(alts)
-                
-                # Si hay productos sin stock, notificar a compras
-                if productos_sin_stock and len(productos_sin_stock) > 0:
-                    historial_conv = cliente.get('conversaciones', []) if cliente else []
-                    for prod_sin_stock in productos_sin_stock:
-                        nombre_prod = prod_sin_stock.get('name', prod_sin_stock.get('nombre', 'Producto'))
-                        notificar_compras_sin_stock(nombre_prod, nombre, remitente, historial_conv)
                 
                 # Detectar marcas mencionadas
                 marcas_detectadas = detectar_marca_preferida(texto)
@@ -2016,7 +2129,7 @@ def procesar_mensaje(remitente, texto, value):
                     )
                 respuesta = f"¡Hola {nombre}! Soy Ovidio de GRUPO SER. Para verificar tu cuenta y pasarte precios, ¿me pasás tu CUIT? Es solo por esta vez."
             else:
-                respuesta = generar_respuesta_con_contexto(texto, historial, nombre, productos_encontrados, None, info_cliente, cliente, es_cliente_verificado)
+                respuesta = generar_respuesta_con_contexto(texto, historial, nombre, productos_encontrados, None, info_cliente, cliente, es_cliente_verificado, contexto_stock)
         
         enviar_mensaje_whatsapp(remitente, respuesta)
         guardar_conversacion(remitente, nombre, texto, respuesta)
