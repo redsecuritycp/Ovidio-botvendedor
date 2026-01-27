@@ -42,6 +42,9 @@ else:
 
 DIAS_EXPIRACION = 15
 
+# URL del backend ISR para sincronización de presupuestos
+ISR_API_URL = "https://isr-web--pansapablo.replit.app"
+
 def limpiar_pdfs_viejos():
     """Elimina PDFs con más de 15 días de antigüedad"""
     try:
@@ -1065,7 +1068,7 @@ def obtener_presupuesto_pendiente(telefono):
         return None
 
 def crear_presupuesto(telefono, nombre_cliente, items, validez_dias=15):
-    """Crea un presupuesto y lo guarda en MongoDB"""
+    """Crea un presupuesto y lo guarda en MongoDB + sincroniza con ISR"""
     try:
         if db is None:
             conectar_mongodb()
@@ -1112,8 +1115,51 @@ def crear_presupuesto(telefono, nombre_cliente, items, validez_dias=15):
             'actualizado': ahora
         }
         
+        # Guardar en MongoDB local (backup)
         presupuestos.insert_one(presupuesto)
         print(f'✅ Presupuesto #{numero} creado para {nombre_cliente}')
+        
+        # Sincronizar con ISR API
+        try:
+            isr_data = {
+                'origen': 'bot',
+                'cliente': {
+                    'nombre': nombre_cliente,
+                    'telefono': telefono
+                },
+                'vendedor': 'Ovidio Bot',
+                'productos': [
+                    {
+                        'codigo': item.get('codigo', ''),
+                        'descripcion': item.get('nombre', ''),
+                        'cantidad': item.get('cantidad', 1),
+                        'precioUSD': item.get('precio', 0),
+                        'iva': item.get('iva', 21)
+                    }
+                    for item in items
+                ],
+                'totales': {
+                    'subtotalUSD': subtotal,
+                    'ivaUSD': total_iva,
+                    'totalUSD': total
+                },
+                'validezDias': validez_dias,
+                'notas': f'Presupuesto generado por Ovidio Bot #{numero}'
+            }
+            
+            response = requests.post(
+                f'{ISR_API_URL}/api/presupuestos',
+                json=isr_data,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                print(f'✅ Presupuesto #{numero} sincronizado con ISR')
+            else:
+                print(f'⚠️ ISR respondió {response.status_code}')
+                
+        except Exception as sync_error:
+            print(f'⚠️ No se pudo sincronizar con ISR: {sync_error}')
         
         return presupuesto
         
