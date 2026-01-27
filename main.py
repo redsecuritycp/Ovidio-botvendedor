@@ -642,9 +642,14 @@ def formatear_contexto_cliente(cliente, datos_cianbox=None):
 def buscar_en_api_productos(termino_busqueda):
     """Busca productos en Cianbox"""
     try:
+        print(f'🔎 Cianbox: Buscando "{termino_busqueda}"...', flush=True)
         productos = obtener_productos(termino_busqueda, limite=5)
+        print(f'🔎 Cianbox: Devolvió {len(productos) if productos else 0} productos', flush=True)
         
         if productos:
+            # Mostrar primer producto para debug
+            p = productos[0]
+            print(f'🔎 Primer producto: {p.get("nombre")} | USD {p.get("precio")} | Stock: {p.get("stock")}', flush=True)
             # Convertir formato Cianbox al formato esperado
             resultado = []
             for p in productos:
