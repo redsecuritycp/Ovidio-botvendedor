@@ -1571,7 +1571,7 @@ def generar_respuesta_con_contexto(mensaje_usuario, historial, nombre_cliente, p
             contexto_productos = "\n\n=== PRODUCTOS ENCONTRADOS ===\n"
             for prod in productos_encontrados:
                 info = formatear_producto_para_respuesta(prod)
-                contexto_productos += f"- {info['nombre']}: USD {info['precio']} + IVA ({info['iva']}%)\n"
+                contexto_productos += f"- {info['nombre']}: USD {info['precio']} + IVA ({info['iva']}%) [Stock: {info['stock']} unidades]\n"
             contexto_productos += "===\n"
         
         contexto_presupuesto = ""
@@ -1643,6 +1643,12 @@ REGLAS CRÍTICAS:
 3. UNA sola característica por producto
 4. NO usar "che", "boludo", ni regionalismos
 5. Ser directo, cordial y profesional
+
+REGLA DE STOCK - MUY IMPORTANTE:
+- NUNCA menciones cantidades de stock a menos que el cliente PREGUNTE EXPLÍCITAMENTE "cuántas tenés" o similar
+- Cuando el cliente quiera comprar, preguntá: "¿Cuántas unidades necesitás?"
+- SOLO después de que diga la cantidad, verificá si hay stock suficiente
+- Si NO hay suficiente, decí cuántas tenemos y ofrecé alternativa
 
 REGLA DE PRECIOS - MUY IMPORTANTE:
 - SIEMPRE que menciones un producto, incluí el precio en USD + IVA
