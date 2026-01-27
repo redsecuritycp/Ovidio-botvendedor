@@ -647,20 +647,52 @@ def formatear_contexto_cliente(cliente, datos_cianbox=None):
 # ============== FUNCIONES DE STOCK ==============
 
 def buscar_en_api_productos(termino_busqueda):
-    """Busca productos usando scraping del panel Cianbox"""
+    """Busca productos en el backend de seguridadrosario.com"""
     try:
-        print(f'🔎 Buscando "{termino_busqueda}"...', flush=True)
+        print(f'🔎 Buscando "{termino_busqueda}" en seguridadrosario.com...', flush=True)
         
-        if SCRAPER_DISPONIBLE:
-            productos = buscar_producto_scraping(termino_busqueda)
-            print(f'🔎 Scraper devolvió {len(productos) if productos else 0} productos', flush=True)
+        url = 'https://seguridadrosario.com/IDSRBE/Productos/ConsProductos'
+        params = {
+            'Producto': termino_busqueda,
+            'CategoriaId': 0,
+            'MarcaId': 0,
+            'OrdenId': 5,
+            'SucursalId': 2,
+            'Oferta': 'false'
+        }
+        
+        response = requests.get(url, params=params, timeout=15)
+        
+        if response.status_code == 200:
+            data = response.json()
+            productos_raw = data.get('producto', [])
+            print(f'🔎 API devolvió {len(productos_raw)} productos', flush=True)
             
-            if productos:
-                p = productos[0]
-                print(f'🔎 Primer producto: {p.get("nombre")} | USD {p.get("precio")} | Stock: {p.get("stock")}', flush=True)
-                return productos[:5]
+            if productos_raw:
+                # Convertir al formato que usa Ovidio
+                productos = []
+                for p in productos_raw[:5]:
+                    producto = {
+                        'name': p.get('producto', '').replace('**', ''),
+                        'nombre': p.get('producto', '').replace('**', ''),
+                        'price': p.get('precioUSD', 0),
+                        'precio': p.get('precioUSD', 0),
+                        'stock': p.get('stockTotal', 0),
+                        'cantidad': p.get('stockTotal', 0),
+                        'sku': p.get('codigoInterno', ''),
+                        'codigo': p.get('codigoInterno', ''),
+                        'iva': 21,
+                        'marca': p.get('marca', '')
+                    }
+                    productos.append(producto)
+                
+                if productos:
+                    p = productos[0]
+                    print(f'🔎 Primer producto: {p.get("nombre")[:50]} | USD {p.get("precio")} | Stock: {p.get("stock")}', flush=True)
+                
+                return productos
         
-        print('⚠️ Scraper no disponible o sin resultados')
+        print(f'⚠️ API respondió con status {response.status_code}', flush=True)
         return []
             
     except Exception as e:
