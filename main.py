@@ -26,6 +26,13 @@ except ImportError:
     CIANBOX_DISPONIBLE = False
     print('⚠️ Servicio Cianbox no disponible')
 
+try:
+    from services.cianbox_scraper import buscar_producto as buscar_producto_scraping, inicializar_scraper
+    SCRAPER_DISPONIBLE = True
+except ImportError:
+    SCRAPER_DISPONIBLE = False
+    print('⚠️ Servicio Scraper no disponible')
+
 app = Flask(__name__)
 
 cliente_mongo = None
@@ -640,40 +647,24 @@ def formatear_contexto_cliente(cliente, datos_cianbox=None):
 # ============== FUNCIONES DE STOCK ==============
 
 def buscar_en_api_productos(termino_busqueda):
-    """Busca productos en Cianbox"""
+    """Busca productos usando scraping del panel Cianbox"""
     try:
-        print(f'🔎 Cianbox: Buscando "{termino_busqueda}"...', flush=True)
-        productos = obtener_productos(termino_busqueda, limite=5)
-        print(f'🔎 Cianbox: Devolvió {len(productos) if productos else 0} productos', flush=True)
+        print(f'🔎 Buscando "{termino_busqueda}"...', flush=True)
         
-        if productos:
-            # Mostrar primer producto para debug
-            p = productos[0]
-            print(f'🔎 Primer producto: {p.get("nombre")} | USD {p.get("precio")} | Stock: {p.get("stock")}', flush=True)
-            # Convertir formato Cianbox al formato esperado
-            resultado = []
-            for p in productos:
-                resultado.append({
-                    'name': p.get('nombre', ''),
-                    'nombre': p.get('nombre', ''),
-                    'price': p.get('precio', 0),
-                    'precio': p.get('precio', 0),
-                    'stock': p.get('stock', 0),
-                    'cantidad': p.get('stock', 0),
-                    'sku': p.get('codigo', ''),
-                    'codigo': p.get('codigo', ''),
-                    'iva': p.get('iva', 21),
-                    'description': p.get('descripcion', ''),
-                    'descripcion': p.get('descripcion', ''),
-                    'marca': p.get('marca', ''),
-                    'categoria': p.get('categoria', '')
-                })
-            return resultado
+        if SCRAPER_DISPONIBLE:
+            productos = buscar_producto_scraping(termino_busqueda)
+            print(f'🔎 Scraper devolvió {len(productos) if productos else 0} productos', flush=True)
+            
+            if productos:
+                p = productos[0]
+                print(f'🔎 Primer producto: {p.get("nombre")} | USD {p.get("precio")} | Stock: {p.get("stock")}', flush=True)
+                return productos[:5]
         
+        print('⚠️ Scraper no disponible o sin resultados')
         return []
-        
+            
     except Exception as e:
-        print(f'❌ Error buscando productos: {e}')
+        print(f'❌ Error buscando productos: {e}', flush=True)
         return []
 
 def formatear_producto_para_respuesta(producto):
@@ -2485,6 +2476,9 @@ if __name__ == '__main__':
     conectar_mongodb()
     if CIANBOX_DISPONIBLE:
         inicializar_cianbox()
+    if SCRAPER_DISPONIBLE:
+        inicializar_scraper()
+    if CIANBOX_DISPONIBLE:
         # Sincronizar clientes de Cianbox al arrancar (si el caché está vacío)
         if db is not None:
             cache_count = db['clientes_cianbox'].count_documents({})
