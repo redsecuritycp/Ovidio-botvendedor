@@ -50,7 +50,7 @@ else:
 DIAS_EXPIRACION = 15
 
 # URL del backend ISR para sincronización de presupuestos
-ISR_API_URL = "https://isr-web--pansapablo.replit.app"
+ISR_API_URL = os.environ.get('ISR_API_URL', 'https://isr-web--pansapablo.replit.app')
 
 def limpiar_pdfs_viejos():
     """Elimina PDFs con más de 15 días de antigüedad"""
