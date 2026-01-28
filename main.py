@@ -1828,6 +1828,77 @@ def detectar_quiere_presupuesto(texto):
     if 'presupuesto' in texto_lower:
         return True
 
+
+def detectar_cantidad_solicitada(texto):
+    """
+    Detecta si el mensaje es una cantidad (número).
+    Retorna el número si es cantidad, None si no.
+    """
+    import re
+    texto_limpio = texto.strip().lower()
+
+    # Remover palabras comunes antes/después del número
+    texto_limpio = re.sub(r'^(dame|quiero|necesito|son|serian|serían)\s*', '',
+                          texto_limpio)
+    texto_limpio = re.sub(r'\s*(unidades|unidad|piezas|pieza)$', '',
+                          texto_limpio)
+    texto_limpio = texto_limpio.strip()
+
+    # Si es solo un número
+    if re.match(r'^\d+$', texto_limpio):
+        return int(texto_limpio)
+
+    return None
+
+
+def obtener_ultimo_producto_consultado(historial):
+    """
+    Busca en el historial el último producto que Ovidio mencionó con precio.
+    Retorna el nombre del producto o None.
+    """
+    import re
+
+    if not historial:
+        return None
+
+    # Buscar en los últimos mensajes del asistente
+    for msg in reversed(historial[-10:]):
+        if msg.get('rol') == 'asistente':
+            contenido = msg.get('contenido', '')
+            # Buscar patrón "producto sale USD X" o "producto a USD X"
+            match = re.search(
+                r'(?:el|la|los|las)?\s*([^,]+?)\s*(?:sale|cuesta|a)\s*USD\s*[\d.]+',
+                contenido, re.IGNORECASE)
+            if match:
+                producto = match.group(1).strip()
+                # Limpiar el nombre
+                producto = re.sub(r'^(el|la|los|las)\s+',
+                                  '',
+                                  producto,
+                                  flags=re.IGNORECASE)
+                return producto
+
+    return None
+
+
+def verificar_stock_producto(nombre_producto):
+    """
+    Busca el producto y retorna info de stock.
+    """
+    try:
+        resultados = buscar_productos_cache(nombre_producto)
+        if resultados and len(resultados) > 0:
+            prod = resultados[0]
+            return {
+                'nombre': prod.get('nombre', prod.get('name', '')),
+                'stock': prod.get('stock', prod.get('cantidad', 0)),
+                'precio': prod.get('precio', prod.get('price', 0))
+            }
+        return None
+    except Exception as e:
+        print(f'❌ Error verificando stock: {e}')
+        return None
+
     # Frases que indican "ya terminé de consultar"
     frases_fin = [
         'nada mas', 'nada más', 'no nada', 'no gracias', 'no gracais',
@@ -1976,7 +2047,8 @@ def generar_respuesta_con_contexto(mensaje_usuario,
                                    presupuesto_texto=None,
                                    info_cliente=None,
                                    cliente_mongo=None,
-                                   es_verificado=True):
+                                   es_verificado=True,
+                                   info_stock_cantidad=None):
     try:
         contexto_productos = ""
         if productos_encontrados and len(productos_encontrados) > 0:
@@ -1985,6 +2057,29 @@ def generar_respuesta_con_contexto(mensaje_usuario,
                 info = formatear_producto_para_respuesta(prod)
                 contexto_productos += f"- {info['nombre']}: USD {info['precio']} + IVA ({info['iva']}%) [Stock: {info['stock']} unidades]\n"
             contexto_productos += "===\n"
+
+        # Info de verificación de stock por cantidad
+        contexto_stock_cantidad = ""
+        if info_stock_cantidad:
+            producto = info_stock_cantidad.get('producto', 'el producto')
+            cantidad = info_stock_cantidad.get('cantidad_pedida', 0)
+            stock = info_stock_cantidad.get('stock_disponible', 0)
+            alcanza = info_stock_cantidad.get('alcanza', False)
+
+            if alcanza:
+                contexto_stock_cantidad = f"""
+=== VERIFICACIÓN DE STOCK ===
+El cliente pidió {cantidad} unidades de {producto}.
+Stock disponible: {stock} unidades.
+RESULTADO: SÍ hay stock suficiente. Confirmá que tenés {cantidad} unidades disponibles.
+==="""
+            else:
+                contexto_stock_cantidad = f"""
+=== VERIFICACIÓN DE STOCK ===
+El cliente pidió {cantidad} unidades de {producto}.
+Stock disponible: {stock} unidades.
+RESULTADO: NO hay stock suficiente. Decile que solo tenés {stock} unidades y ofrecé alternativa o consultar reposición.
+==="""
 
         contexto_presupuesto = ""
         if presupuesto_texto:
@@ -2117,6 +2212,7 @@ ACCESORIOS COMUNES:
 Cliente: {nombre_cliente}
 Historial: {historial_texto if historial_texto else 'Primera conversación'}
 {contexto_productos}
+{contexto_stock_cantidad}
 {contexto_presupuesto}
 {f"Info adicional: {contexto_cliente}" if contexto_cliente else ""}"""
 
@@ -2397,8 +2493,32 @@ def procesar_mensaje(remitente, texto, value):
         # CASO 3: Consulta normal
         else:
             productos_encontrados = []
+            info_stock_cantidad = None
 
-            if detectar_intencion_compra(texto):
+            # Verificar si el cliente está indicando una CANTIDAD
+            cantidad_solicitada = detectar_cantidad_solicitada(texto)
+            if cantidad_solicitada:
+                print(f'🔢 Cantidad detectada: {cantidad_solicitada}',
+                      flush=True)
+                # Buscar último producto consultado en historial
+                ultimo_producto = obtener_ultimo_producto_consultado(historial)
+                if ultimo_producto:
+                    print(f'🔍 Último producto: {ultimo_producto}', flush=True)
+                    # Verificar stock real
+                    info_prod = verificar_stock_producto(ultimo_producto)
+                    if info_prod:
+                        stock_real = info_prod.get('stock', 0)
+                        print(f'📦 Stock real: {stock_real}', flush=True)
+                        info_stock_cantidad = {
+                            'producto': info_prod.get('nombre'),
+                            'cantidad_pedida': cantidad_solicitada,
+                            'stock_disponible': stock_real,
+                            'alcanza': stock_real >= cantidad_solicitada
+                        }
+                        # Agregar producto a encontrados para contexto
+                        productos_encontrados.append(info_prod)
+
+            if detectar_intencion_compra(texto) and not cantidad_solicitada:
                 print(f'🔍 Buscando productos...', flush=True)
                 terminos = extraer_productos_del_mensaje(texto)
                 print(f'🔍 Términos: {terminos}', flush=True)
@@ -2490,7 +2610,8 @@ def procesar_mensaje(remitente, texto, value):
             else:
                 respuesta = generar_respuesta_con_contexto(
                     texto, historial, nombre, productos_encontrados, None,
-                    info_cliente, cliente, es_cliente_verificado)
+                    info_cliente, cliente, es_cliente_verificado,
+                    info_stock_cantidad)
 
         enviar_mensaje_whatsapp(remitente, respuesta)
         guardar_conversacion(remitente, nombre, texto, respuesta)
