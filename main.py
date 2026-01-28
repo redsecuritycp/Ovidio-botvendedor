@@ -1787,34 +1787,37 @@ def detectar_confirmacion_presupuesto(texto):
 
 
 def detectar_intencion_compra(texto):
-    import re
+    """
+    Detecta si el mensaje puede ser una consulta de producto.
+    Lógica invertida: buscar SIEMPRE excepto saludos y frases comunes.
+    """
     texto_lower = texto.lower().strip()
 
-    # Palabras clave tradicionales
-    palabras_clave = [
-        'precio', 'costo', 'vale', 'cuanto', 'cuánto', 'stock', 'tienen',
-        'tenes', 'tenés', 'disponible', 'presupuesto', 'cotizar', 'cotización',
-        'comprar', 'necesito', 'busco', 'quiero', 'camara', 'cámara', 'dvr',
-        'nvr', 'alarma', 'sensor', 'hikvision', 'dahua', 'intelbras', 'ajax',
-        'ubiquiti', 'mikrotik', 'dsc', 'seco-larm', 'zkteco'
+    # NO buscar si es saludo o frase común
+    no_buscar = [
+        'hola', 'buenas', 'buen dia', 'buen día', 'buenos dias', 'buenos días',
+        'buenas tardes', 'buenas noches', 'hey', 'chau', 'adios', 'adiós',
+        'hasta luego', 'nos vemos', 'gracias', 'muchas gracias', 'ok', 'dale',
+        'perfecto', 'listo', 'genial', 'bien', 'todo bien', 'como estas',
+        'cómo estás', 'que tal', 'qué tal', 'si', 'no', 'sí', 'nada mas',
+        'nada más', 'eso es todo', 'ninguna', 'despues te aviso',
+        'después te aviso', 'lo pienso', 'te confirmo', 'te aviso',
+        'ya te digo', 'mas tarde', 'más tarde', 'mañana', 'luego'
     ]
-    for palabra in palabras_clave:
-        if palabra in texto_lower:
-            return True
 
-    # Detectar códigos de producto (números o alfanuméricos)
-    texto_limpio = texto.strip()
+    # Si es exactamente un saludo/frase común, no buscar
+    if texto_lower in no_buscar:
+        return False
 
-    # Si es mayormente números (como "4010")
-    if re.match(r'^\d{3,}$', texto_limpio):
-        return True
+    # Si empieza con saludo pero tiene más contenido, buscar
+    # Ej: "hola, tenes camaras?" -> True
 
-    # Si es alfanumérico que parece código (3-20 chars con número)
-    if re.match(r'^[A-Za-z0-9\-]{3,20}$', texto_limpio):
-        if re.search(r'\d', texto_limpio):
-            return True
+    # Si el mensaje tiene menos de 2 caracteres, no buscar
+    if len(texto_lower) < 2:
+        return False
 
-    return False
+    # TODO LO DEMÁS: BUSCAR
+    return True
 
 
 def detectar_quiere_presupuesto(texto):
