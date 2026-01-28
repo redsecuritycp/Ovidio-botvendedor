@@ -201,6 +201,162 @@ def sincronizar_clientes_cianbox():
         traceback.print_exc()
         return False
 
+# ============== SINCRONIZACIÓN PRODUCTOS ==============
+
+def sincronizar_productos_cache():
+    """
+    Descarga TODOS los productos de seguridadrosario.com 
+    y los guarda en MongoDB para búsqueda local con "contiene".
+    """
+    try:
+        if db is None:
+            print('❌ MongoDB no conectado, no se puede sincronizar productos')
+            return False
+        
+        print('🔄 Iniciando sincronización de productos...')
+        
+        url = 'https://seguridadrosario.com/IDSRBE/Productos/ConsProductos'
+        params = {
+            'Producto': '',
+            'CategoriaId': 0,
+            'MarcaId': 0,
+            'OrdenId': 5,
+            'SucursalId': 0,
+            'Oferta': 'false'
+        }
+        
+        response = requests.get(url, params=params, timeout=60)
+        
+        if response.status_code != 200:
+            print(f'❌ Error obteniendo productos: {response.status_code}')
+            return False
+        
+        data = response.json()
+        productos_raw = data.get('producto', [])
+        
+        if not productos_raw:
+            print('⚠️ No se encontraron productos')
+            return False
+        
+        print(f'📥 Recibidos {len(productos_raw)} productos')
+        
+        coleccion = db['productos_cache']
+        
+        coleccion.delete_many({})
+        
+        for p in productos_raw:
+            nombre = (p.get('producto', '') or '').replace('**', '')
+            codigo = p.get('codigoInterno', '') or ''
+            marca = p.get('marca', '') or ''
+            
+            coleccion.insert_one({
+                'nombre': nombre,
+                'nombre_lower': nombre.lower(),
+                'codigo': codigo,
+                'codigo_lower': codigo.lower(),
+                'marca': marca,
+                'marca_lower': marca.lower(),
+                'precio_usd': p.get('precioUSD', 0),
+                'precio_ars': p.get('precioARS', 0),
+                'stock': p.get('stockTotal', 0),
+                'categoria': p.get('categoria', ''),
+                'categoria_id': p.get('categoriaId', 0),
+                'marca_id': p.get('marcaId', 0),
+                'imagen': p.get('imagenes', [None])[0] if p.get('imagenes') else None,
+                'descripcion': p.get('descripcion', ''),
+                'iva': 21,
+                'sincronizado': datetime.utcnow()
+            })
+        
+        coleccion.create_index('nombre_lower')
+        coleccion.create_index('codigo_lower')
+        coleccion.create_index('marca_lower')
+        
+        print(f'✅ Productos sincronizados: {len(productos_raw)} guardados')
+        return True
+        
+    except Exception as e:
+        print(f'❌ Error sincronizando productos: {e}')
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def buscar_productos_cache(termino):
+    """
+    Busca productos en el caché local de MongoDB.
+    Separa palabras y busca con "contiene" en nombre, código y marca.
+    """
+    try:
+        if db is None:
+            print('⚠️ MongoDB no conectado, usando API externa')
+            return buscar_en_api_productos(termino)
+        
+        coleccion = db['productos_cache']
+        
+        if coleccion.count_documents({}) == 0:
+            print('⚠️ Caché vacío, usando API externa')
+            return buscar_en_api_productos(termino)
+        
+        termino_limpio = termino.lower().strip()
+        palabras = termino_limpio.split()
+        
+        condiciones = []
+        for palabra in palabras:
+            condiciones.append({
+                '$or': [
+                    {'nombre_lower': {'$regex': palabra, '$options': 'i'}},
+                    {'codigo_lower': {'$regex': palabra, '$options': 'i'}},
+                    {'marca_lower': {'$regex': palabra, '$options': 'i'}}
+                ]
+            })
+        
+        if condiciones:
+            query = {'$and': condiciones}
+        else:
+            query = {}
+        
+        resultados = list(coleccion.find(query).limit(10))
+        
+        productos = []
+        for p in resultados:
+            productos.append({
+                'name': p.get('nombre', ''),
+                'nombre': p.get('nombre', ''),
+                'price': p.get('precio_usd', 0),
+                'precio': p.get('precio_usd', 0),
+                'stock': p.get('stock', 0),
+                'cantidad': p.get('stock', 0),
+                'sku': p.get('codigo', ''),
+                'codigo': p.get('codigo', ''),
+                'iva': p.get('iva', 21),
+                'marca': p.get('marca', '')
+            })
+        
+        print(f'🔎 Caché: "{termino}" → {len(productos)} resultados')
+        return productos
+        
+    except Exception as e:
+        print(f'❌ Error buscando en caché: {e}')
+        return buscar_en_api_productos(termino)
+
+
+def cron_sincronizacion_productos():
+    """
+    Ejecuta sincronización de productos cada 6 horas.
+    """
+    while True:
+        time_module.sleep(6 * 60 * 60)
+        print('⏰ Cron: Sincronizando productos...')
+        sincronizar_productos_cache()
+
+
+def iniciar_cron_productos():
+    """Inicia el cron de sincronización de productos"""
+    thread = threading.Thread(target=cron_sincronizacion_productos, daemon=True)
+    thread.start()
+    print('✅ Cron de sincronización productos iniciado (cada 6hs)')
+
 
 def buscar_cliente_en_cache(celular=None, email=None, cuit=None):
     """
@@ -774,7 +930,7 @@ Ejemplos:
         for termino in terminos.split(','):
             termino = termino.strip()
             if termino:
-                resultados = buscar_en_api_productos(termino)
+                resultados = buscar_productos_cache(termino)
                 for prod in resultados:
                     stock = prod.get('stock', prod.get('cantidad', 0))
                     if stock > 0:  # Solo productos CON stock
@@ -1569,7 +1725,7 @@ REGLAS:
             
             # Si no tiene precio, buscar en API
             if precio == 0:
-                resultados = buscar_en_api_productos(prod['nombre'])
+                resultados = buscar_productos_cache(prod['nombre'])
                 if resultados:
                     info = formatear_producto_para_respuesta(resultados[0])
                     precio = info['precio']
@@ -1982,7 +2138,7 @@ def procesar_mensaje(remitente, texto, value):
                 alternativas_encontradas = []
                 
                 for termino in terminos:
-                    resultados = buscar_en_api_productos(termino)
+                    resultados = buscar_productos_cache(termino)
                     print(f'🔍 "{termino}": {len(resultados)} resultados')
                     productos_encontrados.extend(resultados)
                     
@@ -2524,6 +2680,14 @@ if __name__ == '__main__':
             iniciar_cron_seguimientos()
             iniciar_cron_lunes()
             iniciar_cron_cumpleanos()
+            # Sincronizar productos al arrancar si el caché está vacío
+            productos_count = db['productos_cache'].count_documents({})
+            if productos_count == 0:
+                print('📥 Caché productos vacío, sincronizando...')
+                sincronizar_productos_cache()
+            else:
+                print(f'📦 Caché con {productos_count} productos')
+            iniciar_cron_productos()
     port = int(os.environ.get('PORT', 3000))
     print(f'🚀 Ovidio corriendo en puerto {port}')
     app.run(host='0.0.0.0', port=port, debug=False)
