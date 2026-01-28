@@ -2659,28 +2659,26 @@ def sync_status():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-if __name__ == '__main__':
-    limpiar_pdfs_viejos()
-    conectar_mongodb()
-    if CIANBOX_DISPONIBLE:
-        inicializar_cianbox()
-    if SCRAPER_DISPONIBLE:
-        inicializar_scraper()
-    if CIANBOX_DISPONIBLE:
-        # Sincronizar clientes de Cianbox al arrancar (si el caché está vacío)
-        if db is not None:
+def inicializacion_en_background():
+    """Inicialización pesada que corre en segundo plano después de que el servidor ya está corriendo"""
+    time_module.sleep(2)
+    print('🔄 Iniciando inicialización en segundo plano...')
+    try:
+        if CIANBOX_DISPONIBLE:
+            inicializar_cianbox()
+        if SCRAPER_DISPONIBLE:
+            inicializar_scraper()
+        if CIANBOX_DISPONIBLE and db is not None:
             cache_count = db['clientes_cianbox'].count_documents({})
             if cache_count == 0:
                 print('📥 Caché vacío, sincronizando clientes de Cianbox...')
                 sincronizar_clientes_cianbox()
             else:
                 print(f'📦 Caché con {cache_count} clientes de Cianbox')
-            # Iniciar todos los crons
             iniciar_cron_sincronizacion()
             iniciar_cron_seguimientos()
             iniciar_cron_lunes()
             iniciar_cron_cumpleanos()
-            # Sincronizar productos al arrancar si el caché está vacío
             productos_count = db['productos_cache'].count_documents({})
             if productos_count == 0:
                 print('📥 Caché productos vacío, sincronizando...')
@@ -2688,6 +2686,15 @@ if __name__ == '__main__':
             else:
                 print(f'📦 Caché con {productos_count} productos')
             iniciar_cron_productos()
+        print('✅ Inicialización en segundo plano completada')
+    except Exception as e:
+        print(f'❌ Error en inicialización background: {e}')
+
+if __name__ == '__main__':
+    limpiar_pdfs_viejos()
+    conectar_mongodb()
     port = int(os.environ.get('PORT', 3000))
     print(f'🚀 Ovidio corriendo en puerto {port}')
+    background_thread = threading.Thread(target=inicializacion_en_background, daemon=True)
+    background_thread.start()
     app.run(host='0.0.0.0', port=port, debug=False)

@@ -11,7 +11,31 @@ deploymentTarget = "autoscale"
 
 [[ports]]
 localPort = 3000
-externalPort = 80
+externalPort = 3000
 
 [agent]
 expertMode = true
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Ovidio Bot"
+
+[[workflows.workflow]]
+name = "Ovidio Bot"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python main.py"
+waitForPort = 3000
+
+[workflows.workflow.metadata]
+outputType = "console"
