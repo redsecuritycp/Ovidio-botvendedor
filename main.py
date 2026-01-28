@@ -2659,6 +2659,23 @@ def sync_status():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/sync-productos', methods=['GET', 'POST'])
+def sync_productos_endpoint():
+    """Endpoint para disparar sincronización manual de productos"""
+    resultado = sincronizar_productos_cache()
+    if resultado:
+        count = db['productos_cache'].count_documents({}) if db else 0
+        return jsonify({
+            'status': 'ok', 
+            'message': 'Sincronización completada',
+            'productos': count
+        }), 200
+    else:
+        return jsonify({
+            'status': 'error', 
+            'message': 'Error en sincronización'
+        }), 500
+
 def inicializacion_en_background():
     """Inicialización pesada que corre en segundo plano después de que el servidor ya está corriendo"""
     time_module.sleep(2)
@@ -2679,13 +2696,17 @@ def inicializacion_en_background():
             iniciar_cron_seguimientos()
             iniciar_cron_lunes()
             iniciar_cron_cumpleanos()
-            productos_count = db['productos_cache'].count_documents({})
-            if productos_count == 0:
-                print('📥 Caché productos vacío, sincronizando...')
-                sincronizar_productos_cache()
-            else:
-                print(f'📦 Caché con {productos_count} productos')
-            iniciar_cron_productos()
+            # Sincronizar productos al arrancar si el caché está vacío
+            try:
+                productos_count = db['productos_cache'].count_documents({})
+                if productos_count == 0:
+                    print('📥 Caché productos vacío, sincronizando...')
+                    sincronizar_productos_cache()
+                else:
+                    print(f'📦 Caché con {productos_count} productos')
+                iniciar_cron_productos()
+            except Exception as e:
+                print(f'❌ Error inicializando productos: {e}')
         print('✅ Inicialización en segundo plano completada')
     except Exception as e:
         print(f'❌ Error en inicialización background: {e}')
