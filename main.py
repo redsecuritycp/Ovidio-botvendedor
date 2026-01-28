@@ -388,6 +388,12 @@ def buscar_productos_cache(termino):
             })
 
         print(f'🔎 Caché: "{termino}" → {len(productos)} resultados')
+
+        # Fallback a API si caché no encuentra nada
+        if len(productos) == 0:
+            print(f'🔎 Caché vacío para "{termino}", buscando en API...')
+            return buscar_en_api_productos(termino)
+
         return productos
 
     except Exception as e:
