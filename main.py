@@ -2394,6 +2394,11 @@ def procesar_mensaje(remitente, texto, value):
                 terminos = extraer_productos_del_mensaje(texto)
                 print(f'🔍 Términos: {terminos}', flush=True)
 
+                # Si GPT no extrajo términos, usar el texto original
+                if not terminos:
+                    terminos = [texto.strip()]
+                    print(f'🔍 Usando texto original: {terminos}', flush=True)
+
                 productos_sin_stock = []
                 alternativas_encontradas = []
 
