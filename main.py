@@ -282,6 +282,35 @@ def sincronizar_productos_cache():
         return False
 
 
+def extraer_marcas_unicas(productos):
+    """Extrae las marcas únicas de una lista de productos"""
+    marcas = set()
+    for p in productos:
+        marca = p.get('marca', p.get('brand', ''))
+        if marca and marca.strip():
+            marcas.add(marca.strip().upper())
+    return list(marcas)
+
+
+def filtrar_productos_por_marca(productos, marca):
+    """Filtra productos que coincidan con la marca especificada"""
+    marca_lower = marca.lower()
+    return [p for p in productos if 
+            marca_lower in p.get('marca', '').lower() or
+            marca_lower in p.get('brand', '').lower()]
+
+
+def generar_pregunta_marca(marcas, termino_busqueda):
+    """Genera mensaje preguntando qué marca prefiere el cliente"""
+    if len(marcas) == 2:
+        return f"Tengo {termino_busqueda} de {marcas[0]} y {marcas[1]}. ¿Cuál te interesa?"
+    elif len(marcas) == 3:
+        return f"Tengo {termino_busqueda} de {marcas[0]}, {marcas[1]} y {marcas[2]}. ¿Cuál preferís?"
+    else:
+        marcas_texto = ", ".join(marcas[:4])
+        return f"Tengo varias opciones de {termino_busqueda}: {marcas_texto}. ¿De qué marca buscás?"
+
+
 def buscar_productos_cache(termino):
     """
     Busca productos en el caché local de MongoDB.
@@ -2140,6 +2169,33 @@ def procesar_mensaje(remitente, texto, value):
                 for termino in terminos:
                     resultados = buscar_productos_cache(termino)
                     print(f'🔍 "{termino}": {len(resultados)} resultados')
+                    
+                    # Si hay muchos resultados, verificar si hay múltiples marcas
+                    if len(resultados) > 5:
+                        marcas = extraer_marcas_unicas(resultados)
+                        print(f'🔍 Marcas encontradas: {marcas}')
+                        
+                        # Si hay múltiples marcas, preguntar cuál prefiere
+                        if len(marcas) > 1:
+                            # Verificar si el usuario ya especificó una marca en el mensaje
+                            texto_lower = texto.lower()
+                            marca_especificada = None
+                            for marca in marcas:
+                                if marca.lower() in texto_lower:
+                                    marca_especificada = marca
+                                    break
+                            
+                            if marca_especificada:
+                                # Filtrar solo esa marca
+                                resultados = filtrar_productos_por_marca(resultados, marca_especificada)
+                                print(f'🔍 Filtrado por {marca_especificada}: {len(resultados)} productos')
+                            else:
+                                # Preguntar qué marca prefiere
+                                respuesta = generar_pregunta_marca(marcas, termino)
+                                enviar_mensaje_whatsapp(remitente, respuesta)
+                                guardar_conversacion(remitente, nombre, texto, respuesta)
+                                return
+                    
                     productos_encontrados.extend(resultados)
                     
                     # Detectar productos sin stock y buscar alternativas
