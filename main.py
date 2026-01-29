@@ -5,6 +5,15 @@ from datetime import datetime, timedelta
 import requests
 import json
 from openai import OpenAI
+
+try:
+    from normalizador_productos import normalizar_busqueda, obtener_variantes_busqueda
+    NORMALIZADOR_DISPONIBLE = True
+    print('✅ Normalizador de productos cargado')
+except ImportError:
+    NORMALIZADOR_DISPONIBLE = False
+    print('⚠️ Normalizador no disponible')
+
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -328,7 +337,7 @@ def sincronizar_productos_cache():
 def buscar_productos_cache(termino):
     """
     Busca productos en el caché local de MongoDB.
-    Separa palabras y busca con "contiene" en nombre, código y marca.
+    Usa normalizador para corregir errores de escritura.
     """
     try:
         if db is None:
@@ -341,60 +350,54 @@ def buscar_productos_cache(termino):
             print('⚠️ Caché vacío, usando API externa')
             return buscar_en_api_productos(termino)
 
-        termino_limpio = termino.lower().strip()
-        palabras = termino_limpio.split()
-
-        condiciones = []
-        for palabra in palabras:
-            condiciones.append({
-                '$or': [{
-                    'nombre_lower': {
-                        '$regex': palabra,
-                        '$options': 'i'
-                    }
-                }, {
-                    'codigo_lower': {
-                        '$regex': palabra,
-                        '$options': 'i'
-                    }
-                }, {
-                    'marca_lower': {
-                        '$regex': palabra,
-                        '$options': 'i'
-                    }
-                }]
-            })
-
-        if condiciones:
-            query = {'$and': condiciones}
+        # Obtener variantes de búsqueda
+        if NORMALIZADOR_DISPONIBLE:
+            variantes = obtener_variantes_busqueda(termino)
+            print(f'🔄 Variantes: {variantes[:3]}', flush=True)
         else:
-            query = {}
+            variantes = [termino.lower().strip()]
 
-        resultados = list(coleccion.find(query).limit(10))
+        # Intentar cada variante
+        for variante in variantes:
+            palabras = variante.lower().strip().split()
 
-        productos = []
-        for p in resultados:
-            productos.append({
-                'name': p.get('nombre', ''),
-                'nombre': p.get('nombre', ''),
-                'price': p.get('precio_usd', 0),
-                'precio': p.get('precio_usd', 0),
-                'stock': p.get('stock', 0),
-                'cantidad': p.get('stock', 0),
-                'sku': p.get('codigo', ''),
-                'codigo': p.get('codigo', ''),
-                'iva': p.get('iva', 21),
-                'marca': p.get('marca', '')
-            })
+            condiciones = []
+            for palabra in palabras:
+                condiciones.append({
+                    '$or': [
+                        {'nombre_lower': {'$regex': palabra, '$options': 'i'}},
+                        {'codigo_lower': {'$regex': palabra, '$options': 'i'}},
+                        {'marca_lower': {'$regex': palabra, '$options': 'i'}}
+                    ]
+                })
 
-        print(f'🔎 Caché: "{termino}" → {len(productos)} resultados')
+            if condiciones:
+                query = {'$and': condiciones}
+            else:
+                query = {}
 
-        # Fallback a API si caché no encuentra nada
-        if len(productos) == 0:
-            print(f'🔎 Caché vacío para "{termino}", buscando en API...')
-            return buscar_en_api_productos(termino)
+            resultados = list(coleccion.find(query).limit(10))
 
-        return productos
+            if resultados:
+                productos = []
+                for p in resultados:
+                    productos.append({
+                        'name': p.get('nombre', ''),
+                        'nombre': p.get('nombre', ''),
+                        'price': p.get('precio_usd', 0),
+                        'precio': p.get('precio_usd', 0),
+                        'stock': p.get('stock', 0),
+                        'cantidad': p.get('stock', 0),
+                        'sku': p.get('codigo', ''),
+                        'codigo': p.get('codigo', ''),
+                        'iva': p.get('iva', 21),
+                        'marca': p.get('marca', '')
+                    })
+                print(f'🔎 Caché: "{variante}" → {len(productos)} resultados')
+                return productos
+
+        print(f'🔎 Sin resultados en caché, buscando en API...')
+        return buscar_en_api_productos(termino)
 
     except Exception as e:
         print(f'❌ Error buscando en caché: {e}')
