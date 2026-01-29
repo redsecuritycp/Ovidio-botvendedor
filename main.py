@@ -2081,11 +2081,16 @@ def detectar_productos_en_respuesta(respuesta, productos_encontrados):
         if codigo and codigo.lower() in respuesta_lower:
             mencionado = True
 
-        # Coincidencia por nombre (al menos 2 palabras clave)
+        # Coincidencia por nombre (al menos 2 palabras clave significativas)
         if not mencionado and len(palabras_nombre) >= 2:
+            # Filtrar palabras genéricas
+            palabras_validas = [
+                p for p in palabras_nombre
+                if len(p) > 3 and p not in palabras_ignorar
+            ]
             coincidencias = sum(
-                1 for p in palabras_nombre
-                if len(p) > 3 and p in respuesta_lower
+                1 for p in palabras_validas
+                if p in respuesta_lower
             )
             if coincidencias >= 2:
                 mencionado = True
@@ -2319,14 +2324,14 @@ Esta presentación es UNA SOLA VEZ."""
 
 {instruccion_saludo}
 
-=== REGLA CRÍTICA DE PRECIOS ===
-NUNCA escribas precios, valores en USD, ni montos de dinero.
-NO uses "USD", "$", "pesos", ni ningún número que represente precio.
-Los precios los agrega el sistema automáticamente.
-Si mencionás un producto, el sistema agregará su precio real.
+=== REGLA DE PRECIOS ===
+Podés hablar de productos normalmente, pero NO escribas el precio vos.
+El sistema agrega automáticamente los precios al final del mensaje.
+Cuando el cliente pregunte por precio, respondé sobre el producto
+y el sistema mostrará el precio real.
 
-CORRECTO: "Tenemos el kit AX Pro, es muy bueno para locales."
-INCORRECTO: "El kit AX Pro sale USD 85" ← PROHIBIDO
+CORRECTO: "Sí, tenemos el kit AX Pro. Es excelente para locales."
+INCORRECTO: "El kit AX Pro sale USD 85" ← No escribas números de precio
 
 === OTRAS REGLAS ===
 - Máximo 2-3 líneas cortas
