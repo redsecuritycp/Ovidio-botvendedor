@@ -1020,10 +1020,11 @@ def formatear_producto_para_respuesta(producto):
     }
 
 
-def buscar_alternativas_producto(termino_original, cantidad=3):
+def buscar_alternativas_producto(termino_original, cantidad=3, cantidad_minima=0):
     """
     Busca alternativas CON STOCK cuando el producto buscado no tiene.
     Extrae características clave y busca similares.
+    Si cantidad_minima > 0, solo retorna productos con al menos esa cantidad.
     """
     try:
         # Extraer palabras clave del término original
@@ -1063,14 +1064,23 @@ def buscar_alternativas_producto(termino_original, cantidad=3):
         # Buscar alternativas con stock
         alternativas = buscar_productos_cache(tipo_encontrado, solo_con_stock=True)
 
-        # Filtrar para no repetir el original
+        # Filtrar para no repetir el original y cumplir cantidad mínima
         alternativas_filtradas = []
         for alt in alternativas:
             nombre_alt = alt.get('nombre', '').lower()
-            if termino_original.lower() not in nombre_alt:
-                alternativas_filtradas.append(alt)
-                if len(alternativas_filtradas) >= cantidad:
-                    break
+            stock_alt = alt.get('stock', alt.get('cantidad', 0))
+
+            # No repetir el original
+            if termino_original.lower() in nombre_alt:
+                continue
+
+            # Filtrar por cantidad mínima si se especificó
+            if cantidad_minima > 0 and stock_alt < cantidad_minima:
+                continue
+
+            alternativas_filtradas.append(alt)
+            if len(alternativas_filtradas) >= cantidad:
+                break
 
         return alternativas_filtradas
 
@@ -2059,9 +2069,22 @@ def detectar_productos_en_respuesta(respuesta, productos_encontrados):
     """
     Detecta qué productos de la lista fueron mencionados en la respuesta de GPT.
     Retorna lista de productos mencionados.
+    Usa matcheo estricto para evitar falsos positivos.
     """
     if not productos_encontrados or not respuesta:
         return []
+
+    # Palabras genéricas a IGNORAR en el matcheo
+    palabras_ignorar = {
+        'agua', 'caja', 'conexion', 'conexión', 'cable', 'fuente',
+        'blanco', 'negro', 'plastico', 'plástico', 'plastica', 'plástica',
+        'metalico', 'metálico', 'metalica', 'metálica',
+        'interior', 'exterior', 'prueba', 'para', 'con', 'sin',
+        'modelo', 'tipo', 'serie', 'version', 'versión',
+        'alta', 'baja', 'media', 'gran', 'grande', 'pequeño', 'pequeña',
+        'nuevo', 'nueva', 'viejo', 'vieja', 'mini', 'micro', 'mega',
+        'pack', 'kit', 'set', 'combo', 'lote'
+    }
 
     respuesta_lower = respuesta.lower()
     productos_mencionados = []
@@ -2074,33 +2097,41 @@ def detectar_productos_en_respuesta(respuesta, productos_encontrados):
         nombre_lower = nombre.lower()
         palabras_nombre = nombre_lower.split()
 
-        # Verificar si el producto está mencionado
+        # Filtrar palabras genéricas y cortas
+        palabras_significativas = [
+            p for p in palabras_nombre
+            if len(p) > 4 and p not in palabras_ignorar
+        ]
+
         mencionado = False
 
-        # Coincidencia por código
-        if codigo and codigo.lower() in respuesta_lower:
-            mencionado = True
-
-        # Coincidencia por nombre (al menos 2 palabras clave)
-        if not mencionado and len(palabras_nombre) >= 2:
-            coincidencias = sum(
-                1 for p in palabras_nombre
-                if len(p) > 3 and p in respuesta_lower
-            )
-            if coincidencias >= 2:
+        # Coincidencia por código (muy confiable)
+        if codigo and len(codigo) > 3:
+            codigo_lower = codigo.lower()
+            if codigo_lower in respuesta_lower:
                 mencionado = True
 
-        # Coincidencia por marca + tipo de producto
-        if not mencionado and marca:
+        # Coincidencia por nombre: necesita 3+ palabras significativas
+        if not mencionado and len(palabras_significativas) >= 2:
+            coincidencias = sum(
+                1 for p in palabras_significativas
+                if p in respuesta_lower
+            )
+            # Requiere al menos 3 coincidencias O el 60% de las palabras
+            umbral = max(3, int(len(palabras_significativas) * 0.6))
+            if coincidencias >= umbral:
+                mencionado = True
+
+        # Coincidencia por marca + modelo específico
+        if not mencionado and marca and len(marca) > 2:
             marca_lower = marca.lower()
-            tipos = ['domo', 'bullet', 'ptz', 'turret', 'dvr', 'nvr',
-                     'kit', 'sensor', 'teclado', 'hub', 'sirena',
-                     'disco', 'fuente', 'switch', 'cable']
-            for tipo in tipos:
-                if marca_lower in respuesta_lower and tipo in respuesta_lower:
-                    if tipo in nombre_lower:
-                        mencionado = True
-                        break
+            if marca_lower in respuesta_lower:
+                # Buscar modelo específico (ej: DS-2CE76D0T)
+                for palabra in palabras_nombre:
+                    if len(palabra) > 6 and '-' in palabra:
+                        if palabra in respuesta_lower:
+                            mencionado = True
+                            break
 
         if mencionado and prod not in productos_mencionados:
             productos_mencionados.append(prod)
@@ -2136,6 +2167,45 @@ def agregar_precios_reales(respuesta, productos_mencionados):
     if lineas_precio:
         bloque_precios = "\n" + "\n".join(lineas_precio)
         return respuesta.strip() + bloque_precios
+
+    return respuesta
+
+
+def agregar_info_stock_cantidad(respuesta, info_stock_cantidad):
+    """
+    Agrega bloque de información de stock y cantidad al final de la respuesta.
+    Python controla 100% esta información, GPT nunca la escribe.
+    """
+    if not info_stock_cantidad:
+        return respuesta
+
+    lineas = []
+
+    cantidad_pedida = info_stock_cantidad.get('cantidad_pedida', 0)
+    stock_disponible = info_stock_cantidad.get('stock_disponible', 0)
+    alcanza = info_stock_cantidad.get('alcanza', False)
+    producto = info_stock_cantidad.get('producto', '')
+
+    if cantidad_pedida > 0:
+        if stock_disponible == 0:
+            lineas.append(f"\n⚠️ Sin stock de {producto[:30]}")
+        elif not alcanza:
+            lineas.append(f"\n⚠️ Stock disponible: {stock_disponible} unidades (pediste {cantidad_pedida})")
+        else:
+            lineas.append(f"\n✅ Stock disponible: {stock_disponible} unidades")
+
+    # Agregar alternativas si existen
+    alternativas = info_stock_cantidad.get('alternativas', [])
+    if alternativas and (not alcanza or stock_disponible == 0):
+        lineas.append("\n📦 *Alternativas con stock:*")
+        for alt in alternativas[:3]:
+            nombre_alt = alt.get('nombre', alt.get('name', ''))[:40]
+            precio_alt = alt.get('precio', alt.get('price', 0))
+            stock_alt = alt.get('stock', alt.get('cantidad', 0))
+            lineas.append(f"• {nombre_alt}: {stock_alt} unid. - USD {precio_alt} + IVA")
+
+    if lineas:
+        return respuesta.strip() + "\n".join(lineas)
 
     return respuesta
 
@@ -2235,28 +2305,8 @@ Ejemplo: "Tenemos varias opciones. ¿Buscás bullet o domo? ¿Para interior o ex
 ===
 """
 
-        # Info de verificación de stock por cantidad
+        # Info de stock se maneja por Python, no se pasa a GPT
         contexto_stock_cantidad = ""
-        if info_stock_cantidad:
-            producto = info_stock_cantidad.get('producto', 'el producto')
-            cantidad = info_stock_cantidad.get('cantidad_pedida', 0)
-            stock = info_stock_cantidad.get('stock_disponible', 0)
-            alcanza = info_stock_cantidad.get('alcanza', False)
-
-            if alcanza:
-                contexto_stock_cantidad = f"""
-=== VERIFICACIÓN DE STOCK ===
-Cliente pidió {cantidad} unidades de {producto}.
-Stock disponible: {stock} unidades.
-RESULTADO: SÍ hay stock suficiente.
-==="""
-            else:
-                contexto_stock_cantidad = f"""
-=== VERIFICACIÓN DE STOCK ===
-Cliente pidió {cantidad} unidades de {producto}.
-Stock disponible: {stock} unidades.
-RESULTADO: NO hay stock suficiente. Avisale que solo tenés {stock}.
-==="""
 
         contexto_presupuesto = ""
         if presupuesto_texto:
@@ -2319,14 +2369,21 @@ Esta presentación es UNA SOLA VEZ."""
 
 {instruccion_saludo}
 
-=== REGLA CRÍTICA DE PRECIOS ===
-NUNCA escribas precios, valores en USD, ni montos de dinero.
-NO uses "USD", "$", "pesos", ni ningún número que represente precio.
-Los precios los agrega el sistema automáticamente.
-Si mencionás un producto, el sistema agregará su precio real.
+=== REGLAS CRÍTICAS - EL SISTEMA AGREGA AUTOMÁTICAMENTE ===
 
-CORRECTO: "Tenemos el kit AX Pro, es muy bueno para locales."
-INCORRECTO: "El kit AX Pro sale USD 85" ← PROHIBIDO
+1. PRECIOS: No escribas precios ni valores. El sistema los agrega.
+   CORRECTO: "Tenemos el kit AX Pro, excelente para locales."
+   INCORRECTO: "El kit AX Pro sale USD 85" ← PROHIBIDO
+
+2. STOCK/CANTIDADES: No escribas cantidades de stock ni disponibilidad.
+   El sistema verificará el stock y agregará la información.
+   CORRECTO: "Sí, tenemos la cámara Hikvision Domo disponible."
+   INCORRECTO: "Tenemos 471 unidades" ← PROHIBIDO
+   INCORRECTO: "No alcanza, solo hay 471" ← PROHIBIDO
+
+3. Si el cliente pide una cantidad específica, respondé de forma genérica:
+   CORRECTO: "Perfecto, verifico disponibilidad de esa cantidad."
+   El sistema agregará si alcanza o no, y las alternativas.
 
 === OTRAS REGLAS ===
 - Máximo 2-3 líneas cortas
@@ -2668,8 +2725,22 @@ def procesar_mensaje(remitente, texto, value):
                             info_stock_cantidad['mensaje'] = f"Solo tenemos {stock_real} unidades"
                         elif stock_real == 0:
                             info_stock_cantidad['mensaje'] = "No tenemos stock de este producto"
-                            # Buscar alternativas
-                            alternativas = buscar_alternativas_producto(termino_busqueda, cantidad=2)
+                            # Buscar alternativas con stock suficiente
+                            alternativas = buscar_alternativas_producto(
+                                termino_busqueda,
+                                cantidad=3,
+                                cantidad_minima=cantidad_solicitada
+                            )
+                            if alternativas:
+                                info_stock_cantidad['alternativas'] = alternativas
+
+                        # Si hay stock pero no alcanza, también buscar alternativas
+                        if not info_stock_cantidad['alcanza'] and stock_real > 0:
+                            alternativas = buscar_alternativas_producto(
+                                termino_busqueda,
+                                cantidad=3,
+                                cantidad_minima=cantidad_solicitada
+                            )
                             if alternativas:
                                 info_stock_cantidad['alternativas'] = alternativas
 
@@ -2780,6 +2851,12 @@ def procesar_mensaje(remitente, texto, value):
                     texto, historial, nombre, productos_encontrados, None,
                     info_cliente, cliente, es_cliente_verificado,
                     info_stock_cantidad)
+
+                # Python agrega info de stock y alternativas
+                if info_stock_cantidad:
+                    respuesta = agregar_info_stock_cantidad(
+                        respuesta, info_stock_cantidad
+                    )
 
         enviar_mensaje_whatsapp(remitente, respuesta)
         guardar_conversacion(remitente, nombre, texto, respuesta)
