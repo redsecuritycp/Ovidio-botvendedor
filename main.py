@@ -2043,6 +2043,91 @@ REGLAS:
         return []
 
 
+def detectar_productos_en_respuesta(respuesta, productos_encontrados):
+    """
+    Detecta qué productos de la lista fueron mencionados en la respuesta de GPT.
+    Retorna lista de productos mencionados.
+    """
+    if not productos_encontrados or not respuesta:
+        return []
+
+    respuesta_lower = respuesta.lower()
+    productos_mencionados = []
+
+    for prod in productos_encontrados:
+        nombre = prod.get('nombre', prod.get('name', ''))
+        codigo = prod.get('codigo', prod.get('sku', ''))
+        marca = prod.get('marca', '')
+
+        nombre_lower = nombre.lower()
+        palabras_nombre = nombre_lower.split()
+
+        # Verificar si el producto está mencionado
+        mencionado = False
+
+        # Coincidencia por código
+        if codigo and codigo.lower() in respuesta_lower:
+            mencionado = True
+
+        # Coincidencia por nombre (al menos 2 palabras clave)
+        if not mencionado and len(palabras_nombre) >= 2:
+            coincidencias = sum(
+                1 for p in palabras_nombre
+                if len(p) > 3 and p in respuesta_lower
+            )
+            if coincidencias >= 2:
+                mencionado = True
+
+        # Coincidencia por marca + tipo de producto
+        if not mencionado and marca:
+            marca_lower = marca.lower()
+            tipos = ['domo', 'bullet', 'ptz', 'turret', 'dvr', 'nvr',
+                     'kit', 'sensor', 'teclado', 'hub', 'sirena',
+                     'disco', 'fuente', 'switch', 'cable']
+            for tipo in tipos:
+                if marca_lower in respuesta_lower and tipo in respuesta_lower:
+                    if tipo in nombre_lower:
+                        mencionado = True
+                        break
+
+        if mencionado and prod not in productos_mencionados:
+            productos_mencionados.append(prod)
+
+    return productos_mencionados
+
+
+def agregar_precios_reales(respuesta, productos_mencionados):
+    """
+    Agrega bloque de precios reales al final de la respuesta.
+    Python controla 100% los precios, GPT nunca los escribe.
+    """
+    if not productos_mencionados:
+        return respuesta
+
+    # Construir bloque de precios
+    lineas_precio = []
+    for prod in productos_mencionados[:3]:  # Máximo 3 productos
+        nombre = prod.get('nombre', prod.get('name', ''))
+        precio = prod.get('precio', prod.get('price', 0))
+        iva = prod.get('iva', 21)
+        stock = prod.get('stock', prod.get('cantidad', 0))
+
+        # Nombre corto (máx 40 chars)
+        nombre_corto = nombre[:40] + '...' if len(nombre) > 40 else nombre
+
+        # Formato: nombre + precio
+        if stock > 0:
+            lineas_precio.append(f"💰 {nombre_corto}: USD {precio} + IVA")
+        else:
+            lineas_precio.append(f"💰 {nombre_corto}: USD {precio} + IVA (sin stock)")
+
+    if lineas_precio:
+        bloque_precios = "\n" + "\n".join(lineas_precio)
+        return respuesta.strip() + bloque_precios
+
+    return respuesta
+
+
 def generar_respuesta_con_contexto(mensaje_usuario,
                                    historial,
                                    nombre_cliente,
@@ -2053,12 +2138,16 @@ def generar_respuesta_con_contexto(mensaje_usuario,
                                    es_verificado=True,
                                    info_stock_cantidad=None):
     try:
+        # Preparar contexto de productos (solo para que GPT sepa qué hay)
         contexto_productos = ""
         if productos_encontrados and len(productos_encontrados) > 0:
-            contexto_productos = "\n\n=== PRODUCTOS ENCONTRADOS ===\n"
-            for prod in productos_encontrados:
-                info = formatear_producto_para_respuesta(prod)
-                contexto_productos += f"- {info['nombre']}: USD {info['precio']} + IVA ({info['iva']}%) [Stock: {info['stock']} unidades]\n"
+            contexto_productos = "\n\n=== PRODUCTOS DISPONIBLES ===\n"
+            for i, prod in enumerate(productos_encontrados):
+                nombre = prod.get('nombre', prod.get('name', ''))
+                stock = prod.get('stock', prod.get('cantidad', 0))
+                marca = prod.get('marca', '')
+                estado = "con stock" if stock > 0 else "SIN STOCK"
+                contexto_productos += f"- {nombre} ({marca}) [{estado}]\n"
             contexto_productos += "===\n"
 
         # Info de verificación de stock por cantidad
@@ -2072,16 +2161,16 @@ def generar_respuesta_con_contexto(mensaje_usuario,
             if alcanza:
                 contexto_stock_cantidad = f"""
 === VERIFICACIÓN DE STOCK ===
-El cliente pidió {cantidad} unidades de {producto}.
+Cliente pidió {cantidad} unidades de {producto}.
 Stock disponible: {stock} unidades.
-RESULTADO: SÍ hay stock suficiente. Confirmá que tenés {cantidad} unidades disponibles.
+RESULTADO: SÍ hay stock suficiente.
 ==="""
             else:
                 contexto_stock_cantidad = f"""
 === VERIFICACIÓN DE STOCK ===
-El cliente pidió {cantidad} unidades de {producto}.
+Cliente pidió {cantidad} unidades de {producto}.
 Stock disponible: {stock} unidades.
-RESULTADO: NO hay stock suficiente. Decile que solo tenés {stock} unidades y ofrecé alternativa o consultar reposición.
+RESULTADO: NO hay stock suficiente. Avisale que solo tenés {stock}.
 ==="""
 
         contexto_presupuesto = ""
@@ -2123,122 +2212,87 @@ RESULTADO: NO hay stock suficiente. Decile que solo tenés {stock} unidades y of
 
         # Instrucción de saludo según contexto
         if es_primera_vez:
-            instruccion_saludo = f"""PRIMERA VEZ - PRESENTATE:
-"¡Hola {nombre_cliente}! Soy Ovidio, asesor comercial de GRUPO SER. ¿En qué puedo ayudarte?"
+            instruccion_saludo = f"""PRIMERA VEZ:
+"¡Hola {nombre_cliente}! Soy Ovidio de GRUPO SER. ¿En qué puedo ayudarte?"
 Esta presentación es UNA SOLA VEZ."""
         elif es_primer_mensaje_dia:
             instruccion_saludo = f"""NUEVO DÍA:
-"¡Hola {nombre_cliente}! ¿En qué puedo ayudarte hoy?"
-NO te presentes, ya te conoce."""
+"¡Hola {nombre_cliente}!" y continuá."""
         else:
-            instruccion_saludo = """MISMO DÍA - NO SALUDES:
-Continuá la conversación directamente, sin saludar."""
+            instruccion_saludo = """MISMO DÍA: Continuá directo, sin saludar."""
 
         # Info de comportamiento de pago
         info_pago = ""
         if comportamiento and comportamiento.get('perfil'):
             perfil = comportamiento.get('perfil')
             if perfil == 'excelente':
-                info_pago = "CLIENTE EXCELENTE PAGADOR - Podés ofrecer cuenta corriente."
+                info_pago = "CLIENTE EXCELENTE PAGADOR."
             elif perfil == 'riesgoso':
-                info_pago = "CLIENTE CON DEUDA - Solo contado o transferencia anticipada."
+                info_pago = "CLIENTE CON DEUDA - Solo contado."
 
-        mensajes_sistema = f"""Sos Ovidio, asesor comercial de GRUPO SER (seguridad electrónica, Rosario).
+        mensajes_sistema = f"""Sos Ovidio, asesor comercial de GRUPO SER (seguridad electrónica).
 
 {instruccion_saludo}
 
-REGLAS CRÍTICAS:
-1. MÁXIMO 2 LÍNEAS de WhatsApp (50-80 caracteres por línea)
-2. NUNCA incluir links ni URLs
-3. UNA sola característica por producto
-4. NO usar "che", "boludo", ni regionalismos
-5. Ser directo, cordial y profesional
+=== REGLA CRÍTICA DE PRECIOS ===
+NUNCA escribas precios, valores en USD, ni montos de dinero.
+NO uses "USD", "$", "pesos", ni ningún número que represente precio.
+Los precios los agrega el sistema automáticamente.
+Si mencionás un producto, el sistema agregará su precio real.
 
-REGLA DE STOCK - MUY IMPORTANTE:
-- NUNCA menciones cantidades de stock a menos que el cliente PREGUNTE EXPLÍCITAMENTE "cuántas tenés" o similar
-- Cuando el cliente quiera comprar, preguntá: "¿Cuántas unidades necesitás?"
-- SOLO después de que diga la cantidad, verificá si hay stock suficiente
-- Si NO hay suficiente, decí cuántas tenemos y ofrecé alternativa
+CORRECTO: "Tenemos el kit AX Pro, es muy bueno para locales."
+INCORRECTO: "El kit AX Pro sale USD 85" ← PROHIBIDO
 
-PROHIBIDO INVENTAR - CRÍTICO:
-- Si "PRODUCTOS ENCONTRADOS" está vacío o no existe, NO menciones ningún producto ni precio
-- En ese caso respondé: "Dejame buscarlo. ¿Me pasás la marca o modelo exacto?"
-- NUNCA inventes precios, productos o códigos que no estén en PRODUCTOS ENCONTRADOS
-- Si el cliente pregunta por algo que no está en la lista, decí que lo vas a consultar
+=== OTRAS REGLAS ===
+- Máximo 2-3 líneas cortas
+- Sin URLs ni links
+- Profesional y cordial
+- Terminar preguntando si necesita algo más (variar la frase)
 
-REGLA DE PRECIOS - MUY IMPORTANTE:
-- SIEMPRE que menciones un producto, incluí el precio en USD + IVA
-- NUNCA menciones un producto sin precio, ni siquiera en recomendaciones
-- Formato: "El [producto] sale USD [precio] + IVA"
-- SOLO usá precios que aparezcan en PRODUCTOS ENCONTRADOS
-- Ejemplos correctos:
-  * "El kit Hikvision 4 cámaras sale USD 450 + IVA, incluye NVR y disco."
-  * "Te recomiendo el DVR 8ch a USD 180 + IVA y disco 2TB a USD 85 + IVA."
-- Ejemplos INCORRECTOS (nunca hagas esto):
-  * "Te recomiendo el kit Hikvision ColorVu" (SIN PRECIO = MAL)
-  * "Necesitarás un DVR y disco duro" (SIN PRECIO = MAL)
-
-CIERRE DE MENSAJE - MUY IMPORTANTE:
-- SIEMPRE terminar preguntando si necesita algo más
-- NUNCA ofrecer presupuesto directamente, esperar a que diga "no" o "nada más"
-- VARIAR la frase de cierre para no parecer robot. Ejemplos:
-  * "¿Algo más?"
-  * "¿Necesitás algo más?"
-  * "¿Te busco otra cosa?"
-  * "¿Qué más te muestro?"
-  * "¿Algo más que necesite?"
-- NO repetir la misma frase de cierre en mensajes consecutivos
-
-CONOCIMIENTO TÉCNICO - USALO SIEMPRE:
-- CÁMARAS: 2MP=1080p, 4MP=2K, 8MP=4K. Bullet=exterior, Domo=interior/discreto. ColorVu=color de noche. Hikvision=premium, Dahua=calidad/precio, Ajax=inalámbrico premium.
-- DVR/NVR: DVR=cámaras analógicas, NVR=cámaras IP. Canales: 4, 8, 16, 32. 1TB≈7 días con 4 cámaras 2MP.
-- ALARMAS: Ajax=inalámbrica premium, DSC=cableada confiable, Paradox=buena relación precio/calidad.
-- CABLES: UTP Cat5e=100m máx, Cat6=mejor calidad. Coaxil RG59=cámaras analógicas.
-
-COMPORTAMIENTO INTELIGENTE:
-1. SIN STOCK → Ofrecé alternativa similar: "Ese no tenemos, pero el [alternativa] tiene specs similares a USD X + IVA. ¿Te sirve?"
-2. PREGUNTA TÉCNICA → Respondé con conocimiento: "El DVR de 8 canales graba hasta 4 cámaras 4K o 8 cámaras 1080p. ¿Algo más?"
-3. COMPARACIÓN → Compará brevemente: "El Hikvision es premium, el Dahua es similar pero más económico. ¿Cuál preferís?"
-4. COMPLEMENTOS → Sugerí accesorios relacionados: "Para esas cámaras te recomiendo fuente de 12V y baluns. ¿Los agregamos?"
-
-ACCESORIOS COMUNES:
-- Cámaras → Fuentes 12V, Baluns, Conectores BNC, Cable UTP/Coaxil, Cajas de paso
-- DVR/NVR → Disco duro (1TB, 2TB, 4TB), Cable HDMI, Mouse
-- Alarmas → Sirenas, Teclados adicionales, Sensores extra, Batería de respaldo
-- Cercos eléctricos → Aisladores, Alambre, Sirena, Batería
+CONOCIMIENTO TÉCNICO:
+- CÁMARAS: 2MP=1080p, 4MP=2K, 8MP=4K. Bullet=exterior, Domo=interior.
+- DVR/NVR: DVR=analógicas, NVR=IP. 1TB≈7 días con 4 cámaras.
+- ALARMAS: Ajax=inalámbrica premium, DSC=cableada confiable.
 
 {info_pago}
-
 {f"MARCAS PREFERIDAS: {', '.join(marcas_cliente)}" if marcas_cliente else ""}
-{f"PROVEEDORES ACTUALES: {', '.join(proveedores_cliente)}" if proveedores_cliente else ""}
 
 Cliente: {nombre_cliente}
 Historial: {historial_texto if historial_texto else 'Primera conversación'}
 {contexto_productos}
 {contexto_stock_cantidad}
 {contexto_presupuesto}
-{f"Info adicional: {contexto_cliente}" if contexto_cliente else ""}"""
+{f"Info: {contexto_cliente}" if contexto_cliente else ""}"""
 
-        respuesta = cliente_openai.chat.completions.create(model="gpt-4",
-                                                           messages=[{
-                                                               "role":
-                                                               "system",
-                                                               "content":
-                                                               mensajes_sistema
-                                                           }, {
-                                                               "role":
-                                                               "user",
-                                                               "content":
-                                                               mensaje_usuario
-                                                           }],
-                                                           temperature=0.7,
-                                                           max_tokens=150)
+        respuesta = cliente_openai.chat.completions.create(
+            model="gpt-4",
+            messages=[{
+                "role": "system",
+                "content": mensajes_sistema
+            }, {
+                "role": "user",
+                "content": mensaje_usuario
+            }],
+            temperature=0.7,
+            max_tokens=150
+        )
 
-        return respuesta.choices[0].message.content
+        respuesta_texto = respuesta.choices[0].message.content
+
+        # PASO CRÍTICO: Python agrega precios reales
+        if productos_encontrados and len(productos_encontrados) > 0:
+            productos_mencionados = detectar_productos_en_respuesta(
+                respuesta_texto, productos_encontrados
+            )
+            respuesta_texto = agregar_precios_reales(
+                respuesta_texto, productos_mencionados
+            )
+
+        return respuesta_texto
 
     except Exception as e:
         print(f'❌ Error generando respuesta: {e}')
-        return f"Hola {nombre_cliente}, disculpá, tuve un inconveniente. ¿Podés repetirme tu consulta?"
+        return f"Hola {nombre_cliente}, disculpá, tuve un problema. ¿Podés repetirme?"
 
 
 # ============== WEBHOOK ==============
