@@ -1023,56 +1023,93 @@ def formatear_producto_para_respuesta(producto):
 def buscar_alternativas_producto(termino_original, cantidad=3):
     """
     Busca alternativas CON STOCK cuando el producto buscado no tiene.
-    Extrae características clave y busca similares.
+    Prioriza productos con características similares (resolución, tipo).
     """
     try:
-        # Extraer palabras clave del término original
-        palabras = termino_original.lower().split()
+        import re
+        termino_lower = termino_original.lower()
 
-        # Tipos de productos comunes
-        tipos = ['camara', 'domo', 'bullet', 'ptz', 'turret', 'dvr', 'nvr',
-                 'sensor', 'alarma', 'kit', 'hub', 'teclado', 'sirena',
-                 'disco', 'fuente', 'switch', 'cable', 'balun']
+        # Extraer características del término original
+        resolucion_pedida = None
+        match_res = re.search(r'(\d+)\s*mp', termino_lower)
+        if match_res:
+            resolucion_pedida = int(match_res.group(1))
 
-        # Buscar tipo en el término
+        # Detectar tipo de producto
+        tipos = ['camara', 'domo', 'bullet', 'ptz', 'turret', 'dvr',
+                 'nvr', 'sensor', 'alarma', 'kit', 'hub', 'teclado',
+                 'sirena', 'disco', 'fuente', 'switch', 'cable', 'balun']
+
         tipo_encontrado = None
         for tipo in tipos:
-            if tipo in termino_original.lower():
+            if tipo in termino_lower:
                 tipo_encontrado = tipo
                 break
 
-        if not tipo_encontrado:
-            # Intentar con GPT para extraer tipo
-            try:
-                respuesta = cliente_openai.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{
-                        "role": "system",
-                        "content": "Extraé el tipo de producto en 1-2 palabras. Ejemplos: 'cámara domo', 'sensor pir', 'dvr 8ch'. Solo respondé con las palabras clave."
-                    }, {
-                        "role": "user",
-                        "content": termino_original
-                    }],
-                    temperature=0.1,
-                    max_tokens=20
-                )
-                tipo_encontrado = respuesta.choices[0].message.content.strip()
-            except Exception:
-                tipo_encontrado = termino_original
+        # Detectar marca
+        marcas = ['hikvision', 'dahua', 'ajax', 'dsc', 'intelbras',
+                  'ubiquiti', 'tiandy', 'cygnus', 'zkteco']
+        marca_encontrada = None
+        for marca in marcas:
+            if marca in termino_lower:
+                marca_encontrada = marca
+                break
+
+        # Construir término de búsqueda
+        if tipo_encontrado:
+            termino_busqueda = tipo_encontrado
+            if marca_encontrada:
+                termino_busqueda = f"{marca_encontrada} {tipo_encontrado}"
+        else:
+            termino_busqueda = termino_original
 
         # Buscar alternativas con stock
-        alternativas = buscar_productos_cache(tipo_encontrado, solo_con_stock=True)
+        alternativas = buscar_productos_cache(termino_busqueda,
+                                              solo_con_stock=True)
 
-        # Filtrar para no repetir el original
-        alternativas_filtradas = []
+        if not alternativas and tipo_encontrado:
+            # Buscar solo por tipo si no hay con marca
+            alternativas = buscar_productos_cache(tipo_encontrado,
+                                                  solo_con_stock=True)
+
+        # Filtrar y ordenar por similitud
+        alternativas_puntuadas = []
         for alt in alternativas:
-            nombre_alt = alt.get('nombre', '').lower()
-            if termino_original.lower() not in nombre_alt:
-                alternativas_filtradas.append(alt)
-                if len(alternativas_filtradas) >= cantidad:
-                    break
+            nombre_alt = alt.get('nombre', alt.get('name', '')).lower()
 
-        return alternativas_filtradas
+            # No incluir el producto original
+            if termino_lower in nombre_alt:
+                continue
+
+            puntuacion = 0
+
+            # Bonus por misma marca
+            if marca_encontrada and marca_encontrada in nombre_alt:
+                puntuacion += 10
+
+            # Bonus por mismo tipo
+            if tipo_encontrado and tipo_encontrado in nombre_alt:
+                puntuacion += 5
+
+            # Bonus por resolución cercana
+            if resolucion_pedida:
+                match_alt = re.search(r'(\d+)\s*mp', nombre_alt)
+                if match_alt:
+                    res_alt = int(match_alt.group(1))
+                    # Priorizar resolución más cercana (preferir mayor)
+                    diff = abs(res_alt - resolucion_pedida)
+                    if res_alt >= resolucion_pedida:
+                        puntuacion += max(0, 10 - diff)
+                    else:
+                        puntuacion += max(0, 5 - diff)
+
+            alternativas_puntuadas.append((puntuacion, alt))
+
+        # Ordenar por puntuación descendente
+        alternativas_puntuadas.sort(key=lambda x: x[0], reverse=True)
+
+        # Retornar las mejores alternativas
+        return [alt for _, alt in alternativas_puntuadas[:cantidad]]
 
     except Exception as e:
         print(f'❌ Error buscando alternativas: {e}')
@@ -1846,22 +1883,37 @@ def detectar_quiere_presupuesto(texto):
 
 def detectar_cantidad_solicitada(texto):
     """
-    Detecta si el mensaje es una cantidad (número).
-    Retorna el número si es cantidad, None si no.
+    Detecta si el mensaje contiene una cantidad.
+    Soporta: "500", "quiero 500", "500 camaras", "quiero 500 camaras"
+    Retorna el número si encuentra cantidad, None si no.
     """
     import re
     texto_limpio = texto.strip().lower()
 
-    # Remover palabras comunes antes/después del número
-    texto_limpio = re.sub(r'^(dame|quiero|necesito|son|serian|serían)\s*', '',
-                          texto_limpio)
-    texto_limpio = re.sub(r'\s*(unidades|unidad|piezas|pieza)$', '',
-                          texto_limpio)
-    texto_limpio = texto_limpio.strip()
+    # Patrón 1: número al inicio seguido de producto
+    # "500 camaras", "50 sensores"
+    match = re.match(r'^(\d+)\s+\w+', texto_limpio)
+    if match:
+        return int(match.group(1))
 
-    # Si es solo un número
+    # Patrón 2: "quiero/dame/necesito X" seguido de algo
+    # "quiero 500 camaras", "dame 10"
+    match = re.search(
+        r'(?:quiero|dame|necesito|son|serian|serían)\s+(\d+)',
+        texto_limpio
+    )
+    if match:
+        return int(match.group(1))
+
+    # Patrón 3: solo número
     if re.match(r'^\d+$', texto_limpio):
         return int(texto_limpio)
+
+    # Patrón 4: número + "unidades"
+    match = re.search(r'(\d+)\s*(?:unidades|unidad|piezas|pieza)',
+                      texto_limpio)
+    if match:
+        return int(match.group(1))
 
     return None
 
@@ -2057,14 +2109,34 @@ REGLAS:
 
 def detectar_productos_en_respuesta(respuesta, productos_encontrados):
     """
-    Detecta qué productos de la lista fueron mencionados en la respuesta de GPT.
-    Retorna lista de productos mencionados.
+    Detecta qué productos de la lista fueron mencionados en la respuesta.
+    Usa lista de palabras a ignorar para evitar falsos positivos.
     """
     if not productos_encontrados or not respuesta:
         return []
 
     respuesta_lower = respuesta.lower()
     productos_mencionados = []
+
+    # Palabras genéricas a IGNORAR en el matcheo
+    palabras_ignorar = {
+        'agua', 'caja', 'conexion', 'conexión', 'cable', 'fuente',
+        'blanco', 'negro', 'plastico', 'plástico', 'plastica',
+        'plástica', 'metalico', 'metálico', 'metalica', 'metálica',
+        'interior', 'exterior', 'prueba', 'para', 'con', 'sin',
+        'modelo', 'tipo', 'serie', 'version', 'versión', 'tapa',
+        'cctv', 'seguridad', 'analogica', 'analógica', 'analogico',
+        'analógico', 'digital', 'inalambrico', 'inalámbrico',
+        'inalambrica', 'inalámbrica', 'wifi', 'ethernet'
+    }
+
+    # Nombres de líneas/familias de productos (matcheo especial)
+    lineas_producto = {
+        'ax pro': ['ax', 'pro', 'axpro'],
+        'colorvu': ['colorvu', 'color', 'vu'],
+        'acusense': ['acusense'],
+        'turbo hd': ['turbo', 'hd'],
+    }
 
     for prod in productos_encontrados:
         nombre = prod.get('nombre', prod.get('name', ''))
@@ -2074,33 +2146,48 @@ def detectar_productos_en_respuesta(respuesta, productos_encontrados):
         nombre_lower = nombre.lower()
         palabras_nombre = nombre_lower.split()
 
-        # Verificar si el producto está mencionado
         mencionado = False
 
-        # Coincidencia por código
-        if codigo and codigo.lower() in respuesta_lower:
-            mencionado = True
-
-        # Coincidencia por nombre (al menos 2 palabras clave)
-        if not mencionado and len(palabras_nombre) >= 2:
-            coincidencias = sum(
-                1 for p in palabras_nombre
-                if len(p) > 3 and p in respuesta_lower
-            )
-            if coincidencias >= 2:
+        # 1. Coincidencia por código exacto
+        if codigo and len(codigo) > 4:
+            if codigo.lower() in respuesta_lower:
                 mencionado = True
 
-        # Coincidencia por marca + tipo de producto
-        if not mencionado and marca:
-            marca_lower = marca.lower()
-            tipos = ['domo', 'bullet', 'ptz', 'turret', 'dvr', 'nvr',
-                     'kit', 'sensor', 'teclado', 'hub', 'sirena',
-                     'disco', 'fuente', 'switch', 'cable']
-            for tipo in tipos:
-                if marca_lower in respuesta_lower and tipo in respuesta_lower:
-                    if tipo in nombre_lower:
+        # 2. Coincidencia por línea de producto (AX PRO, etc)
+        if not mencionado:
+            for linea, variantes in lineas_producto.items():
+                if linea in nombre_lower or any(v in nombre_lower for v in variantes):
+                    if any(v in respuesta_lower for v in variantes):
                         mencionado = True
                         break
+
+        # 3. Coincidencia por nombre (palabras válidas)
+        if not mencionado and len(palabras_nombre) >= 2:
+            palabras_validas = [
+                p for p in palabras_nombre
+                if len(p) > 3 and p not in palabras_ignorar
+            ]
+            if palabras_validas:
+                coincidencias = sum(
+                    1 for p in palabras_validas
+                    if p in respuesta_lower
+                )
+                # Exigir al menos 2 coincidencias O 60% de palabras válidas
+                umbral = max(2, int(len(palabras_validas) * 0.6))
+                if coincidencias >= umbral:
+                    mencionado = True
+
+        # 4. Coincidencia por marca + tipo específico
+        if not mencionado and marca:
+            marca_lower = marca.lower()
+            tipos_especificos = ['domo', 'bullet', 'ptz', 'turret',
+                                'dvr', 'nvr', 'kit', 'hub', 'panel']
+            for tipo in tipos_especificos:
+                if (marca_lower in respuesta_lower and
+                    tipo in respuesta_lower and
+                    tipo in nombre_lower):
+                    mencionado = True
+                    break
 
         if mencionado and prod not in productos_mencionados:
             productos_mencionados.append(prod)
@@ -2319,16 +2406,17 @@ Esta presentación es UNA SOLA VEZ."""
 
 {instruccion_saludo}
 
-=== REGLA CRÍTICA DE PRECIOS ===
-NUNCA escribas precios, valores en USD, ni montos de dinero.
-NO uses "USD", "$", "pesos", ni ningún número que represente precio.
-Los precios los agrega el sistema automáticamente.
-Si mencionás un producto, el sistema agregará su precio real.
+=== REGLA DE PRECIOS ===
+Podés hablar de productos normalmente, pero NO escribas el precio vos.
+El sistema agrega automáticamente los precios al final del mensaje.
+Cuando el cliente pregunte por precio, respondé sobre el producto
+y el sistema mostrará el precio real.
 
-CORRECTO: "Tenemos el kit AX Pro, es muy bueno para locales."
-INCORRECTO: "El kit AX Pro sale USD 85" ← PROHIBIDO
+CORRECTO: "El AX Pro es excelente para locales comerciales."
+INCORRECTO: "El AX Pro sale USD 85" ← NO escribir números
 
 === OTRAS REGLAS ===
+- Si el contexto dice "NO hay stock suficiente", SIEMPRE mencionalo
 - Máximo 2-3 líneas cortas
 - Sin URLs ni links
 - Profesional y cordial
@@ -2699,6 +2787,7 @@ def procesar_mensaje(remitente, texto, value):
                         if alternativas:
                             resultados = alternativas
                             print(f'✅ Alternativas encontradas: {len(alternativas)}')
+                            alternativas_encontradas.extend(alternativas)
 
                     print(f'🔍 "{termino}": {len(resultados)} resultados')
                     productos_encontrados.extend(resultados)
