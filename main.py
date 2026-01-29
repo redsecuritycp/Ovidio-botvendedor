@@ -334,10 +334,10 @@ def sincronizar_productos_cache():
         return False
 
 
-def buscar_productos_cache(termino):
+def buscar_productos_cache(termino, solo_con_stock=True):
     """
     Busca productos en el caché local de MongoDB.
-    Usa normalizador para corregir errores de escritura.
+    Por defecto solo retorna productos CON stock.
     """
     try:
         if db is None:
@@ -376,25 +376,33 @@ def buscar_productos_cache(termino):
             else:
                 query = {}
 
-            resultados = list(coleccion.find(query).limit(10))
+            # Ordenar por stock (mayor primero)
+            resultados = list(coleccion.find(query).sort('stock', -1).limit(20))
 
             if resultados:
                 productos = []
                 for p in resultados:
+                    stock = p.get('stock', 0)
+                    # Filtrar sin stock si está activado
+                    if solo_con_stock and stock <= 0:
+                        continue
                     productos.append({
                         'name': p.get('nombre', ''),
                         'nombre': p.get('nombre', ''),
                         'price': p.get('precio_usd', 0),
                         'precio': p.get('precio_usd', 0),
-                        'stock': p.get('stock', 0),
-                        'cantidad': p.get('stock', 0),
+                        'stock': stock,
+                        'cantidad': stock,
                         'sku': p.get('codigo', ''),
                         'codigo': p.get('codigo', ''),
                         'iva': p.get('iva', 21),
-                        'marca': p.get('marca', '')
+                        'marca': p.get('marca', ''),
+                        'categoria': p.get('categoria', '')
                     })
-                print(f'🔎 Caché: "{variante}" → {len(productos)} resultados')
-                return productos
+
+                if productos:
+                    print(f'🔎 Caché: "{variante}" → {len(productos)} con stock')
+                    return productos[:10]
 
         print(f'🔎 Sin resultados en caché, buscando en API...')
         return buscar_en_api_productos(termino)
@@ -1012,55 +1020,59 @@ def formatear_producto_para_respuesta(producto):
     }
 
 
-def buscar_alternativas_producto(producto_sin_stock, cantidad=3):
+def buscar_alternativas_producto(termino_original, cantidad=3):
     """
-    Busca productos alternativos cuando el solicitado no tiene stock.
-    Usa GPT para identificar características clave y busca similares.
+    Busca alternativas CON STOCK cuando el producto buscado no tiene.
+    Extrae características clave y busca similares.
     """
     try:
-        nombre = producto_sin_stock.get('name',
-                                        producto_sin_stock.get('nombre', ''))
+        # Extraer palabras clave del término original
+        palabras = termino_original.lower().split()
 
-        # Extraer categoría/tipo del producto
-        respuesta = cliente_openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{
-                "role":
-                "system",
-                "content":
-                """Dado un producto de seguridad electrónica, extraé términos de búsqueda para encontrar alternativas similares.
+        # Tipos de productos comunes
+        tipos = ['camara', 'domo', 'bullet', 'ptz', 'turret', 'dvr', 'nvr',
+                 'sensor', 'alarma', 'kit', 'hub', 'teclado', 'sirena',
+                 'disco', 'fuente', 'switch', 'cable', 'balun']
 
-Respondé SOLO con 2-3 palabras clave separadas por coma.
-Ejemplos:
-- "Cámara Domo IP Hikvision 2MP" → "cámara domo IP, 2MP"
-- "DVR Hikvision 8 canales" → "DVR 8 canales"
-- "Sensor de movimiento DSC" → "sensor movimiento, PIR"
-"""
-            }, {
-                "role": "user",
-                "content": nombre
-            }],
-            temperature=0.3,
-            max_tokens=30)
-
-        terminos = respuesta.choices[0].message.content.strip()
-
-        # Buscar alternativas
-        alternativas = []
-        for termino in terminos.split(','):
-            termino = termino.strip()
-            if termino:
-                resultados = buscar_productos_cache(termino)
-                for prod in resultados:
-                    stock = prod.get('stock', prod.get('cantidad', 0))
-                    if stock > 0:  # Solo productos CON stock
-                        alternativas.append(prod)
-                        if len(alternativas) >= cantidad:
-                            break
-            if len(alternativas) >= cantidad:
+        # Buscar tipo en el término
+        tipo_encontrado = None
+        for tipo in tipos:
+            if tipo in termino_original.lower():
+                tipo_encontrado = tipo
                 break
 
-        return alternativas[:cantidad]
+        if not tipo_encontrado:
+            # Intentar con GPT para extraer tipo
+            try:
+                respuesta = cliente_openai.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{
+                        "role": "system",
+                        "content": "Extraé el tipo de producto en 1-2 palabras. Ejemplos: 'cámara domo', 'sensor pir', 'dvr 8ch'. Solo respondé con las palabras clave."
+                    }, {
+                        "role": "user",
+                        "content": termino_original
+                    }],
+                    temperature=0.1,
+                    max_tokens=20
+                )
+                tipo_encontrado = respuesta.choices[0].message.content.strip()
+            except Exception:
+                tipo_encontrado = termino_original
+
+        # Buscar alternativas con stock
+        alternativas = buscar_productos_cache(tipo_encontrado, solo_con_stock=True)
+
+        # Filtrar para no repetir el original
+        alternativas_filtradas = []
+        for alt in alternativas:
+            nombre_alt = alt.get('nombre', '').lower()
+            if termino_original.lower() not in nombre_alt:
+                alternativas_filtradas.append(alt)
+                if len(alternativas_filtradas) >= cantidad:
+                    break
+
+        return alternativas_filtradas
 
     except Exception as e:
         print(f'❌ Error buscando alternativas: {e}')
@@ -2128,6 +2140,65 @@ def agregar_precios_reales(respuesta, productos_mencionados):
     return respuesta
 
 
+def evaluar_busqueda_consultiva(productos_encontrados, mensaje_usuario):
+    """
+    Determina si hay que hacer preguntas consultivas al cliente.
+    Retorna dict con info para el prompt.
+    """
+    resultado = {
+        'hacer_consulta': False,
+        'tipo_consulta': None,
+        'opciones': []
+    }
+
+    if not productos_encontrados or len(productos_encontrados) <= 3:
+        return resultado
+
+    # Si hay muchos productos, analizar qué preguntar
+    marcas = set()
+    tipos = set()
+
+    for prod in productos_encontrados:
+        marca = prod.get('marca', '')
+        nombre = prod.get('nombre', '').lower()
+
+        if marca:
+            marcas.add(marca)
+
+        # Detectar tipos
+        if 'domo' in nombre:
+            tipos.add('domo')
+        if 'bullet' in nombre:
+            tipos.add('bullet')
+        if 'ptz' in nombre:
+            tipos.add('ptz')
+        if 'turret' in nombre:
+            tipos.add('turret')
+        if 'interior' in nombre:
+            tipos.add('interior')
+        if 'exterior' in nombre:
+            tipos.add('exterior')
+        if '2mp' in nombre or '1080' in nombre:
+            tipos.add('2MP')
+        if '4mp' in nombre or '2k' in nombre:
+            tipos.add('4MP')
+        if '8mp' in nombre or '4k' in nombre:
+            tipos.add('8MP')
+
+    # Decidir qué preguntar
+    if len(productos_encontrados) > 5:
+        resultado['hacer_consulta'] = True
+
+        if len(tipos) > 1:
+            resultado['tipo_consulta'] = 'tipo_camara'
+            resultado['opciones'] = list(tipos)[:4]
+        elif len(marcas) > 1:
+            resultado['tipo_consulta'] = 'marca'
+            resultado['opciones'] = list(marcas)[:4]
+
+    return resultado
+
+
 def generar_respuesta_con_contexto(mensaje_usuario,
                                    historial,
                                    nombre_cliente,
@@ -2140,15 +2211,29 @@ def generar_respuesta_con_contexto(mensaje_usuario,
     try:
         # Preparar contexto de productos (solo para que GPT sepa qué hay)
         contexto_productos = ""
+        consulta_info = evaluar_busqueda_consultiva(productos_encontrados, mensaje_usuario)
+
         if productos_encontrados and len(productos_encontrados) > 0:
             contexto_productos = "\n\n=== PRODUCTOS DISPONIBLES ===\n"
-            for i, prod in enumerate(productos_encontrados):
+            for i, prod in enumerate(productos_encontrados[:5]):
                 nombre = prod.get('nombre', prod.get('name', ''))
                 stock = prod.get('stock', prod.get('cantidad', 0))
                 marca = prod.get('marca', '')
-                estado = "con stock" if stock > 0 else "SIN STOCK"
-                contexto_productos += f"- {nombre} ({marca}) [{estado}]\n"
+                contexto_productos += f"- {nombre} ({marca})\n"
+            if len(productos_encontrados) > 5:
+                contexto_productos += f"... y {len(productos_encontrados) - 5} productos más\n"
             contexto_productos += "===\n"
+
+            # Agregar instrucción consultiva si aplica
+            if consulta_info['hacer_consulta']:
+                opciones = ', '.join(consulta_info['opciones'])
+                contexto_productos += f"""
+=== CONSULTA REQUERIDA ===
+Hay muchos productos. Preguntale al cliente para filtrar.
+Opciones detectadas: {opciones}
+Ejemplo: "Tenemos varias opciones. ¿Buscás bullet o domo? ¿Para interior o exterior?"
+===
+"""
 
         # Info de verificación de stock por cantidad
         contexto_stock_cantidad = ""
@@ -2555,24 +2640,39 @@ def procesar_mensaje(remitente, texto, value):
             # Verificar si el cliente está indicando una CANTIDAD
             cantidad_solicitada = detectar_cantidad_solicitada(texto)
             if cantidad_solicitada:
-                print(f'🔢 Cantidad detectada: {cantidad_solicitada}',
-                      flush=True)
+                print(f'🔢 Cantidad detectada: {cantidad_solicitada}', flush=True)
+
                 # Buscar último producto consultado en historial
                 ultimo_producto = obtener_ultimo_producto_consultado(historial)
                 if ultimo_producto:
                     print(f'🔍 Último producto: {ultimo_producto}', flush=True)
-                    # Verificar stock real
-                    info_prod = verificar_stock_producto(ultimo_producto)
-                    if info_prod:
-                        stock_real = info_prod.get('stock', 0)
+
+                    # Buscar producto en caché (incluyendo sin stock para verificar)
+                    termino_busqueda = ultimo_producto if isinstance(ultimo_producto, str) else ultimo_producto.get('nombre', ultimo_producto.get('name', ''))
+                    resultados = buscar_productos_cache(termino_busqueda, solo_con_stock=False)
+                    if resultados:
+                        info_prod = resultados[0]
+                        stock_real = info_prod.get('stock', info_prod.get('cantidad', 0))
                         print(f'📦 Stock real: {stock_real}', flush=True)
+
                         info_stock_cantidad = {
-                            'producto': info_prod.get('nombre'),
+                            'producto': info_prod.get('nombre', info_prod.get('name', '')),
                             'cantidad_pedida': cantidad_solicitada,
                             'stock_disponible': stock_real,
-                            'alcanza': stock_real >= cantidad_solicitada
+                            'alcanza': stock_real >= cantidad_solicitada,
+                            'precio': info_prod.get('precio', info_prod.get('price', 0))
                         }
-                        # Agregar producto a encontrados para contexto
+
+                        # Si no alcanza, buscar alternativas
+                        if not info_stock_cantidad['alcanza'] and stock_real > 0:
+                            info_stock_cantidad['mensaje'] = f"Solo tenemos {stock_real} unidades"
+                        elif stock_real == 0:
+                            info_stock_cantidad['mensaje'] = "No tenemos stock de este producto"
+                            # Buscar alternativas
+                            alternativas = buscar_alternativas_producto(termino_busqueda, cantidad=2)
+                            if alternativas:
+                                info_stock_cantidad['alternativas'] = alternativas
+
                         productos_encontrados.append(info_prod)
 
             if detectar_intencion_compra(texto) and not cantidad_solicitada:
@@ -2589,7 +2689,17 @@ def procesar_mensaje(remitente, texto, value):
                 alternativas_encontradas = []
 
                 for termino in terminos:
-                    resultados = buscar_productos_cache(termino)
+                    # Buscar solo productos CON stock
+                    resultados = buscar_productos_cache(termino, solo_con_stock=True)
+
+                    # Si no hay con stock, buscar alternativas
+                    if not resultados:
+                        print(f'⚠️ Sin stock para "{termino}", buscando alternativas...')
+                        alternativas = buscar_alternativas_producto(termino, cantidad=3)
+                        if alternativas:
+                            resultados = alternativas
+                            print(f'✅ Alternativas encontradas: {len(alternativas)}')
+
                     print(f'🔍 "{termino}": {len(resultados)} resultados')
                     productos_encontrados.extend(resultados)
 
@@ -2599,7 +2709,8 @@ def procesar_mensaje(remitente, texto, value):
                         if stock <= 0:
                             productos_sin_stock.append(prod)
                             # Buscar alternativas
-                            alts = buscar_alternativas_producto(prod)
+                            alts = buscar_alternativas_producto(
+                                prod.get('nombre', prod.get('name', '')), cantidad=3)
                             alternativas_encontradas.extend(alts)
 
                 # Si hay productos sin stock, notificar a compras
