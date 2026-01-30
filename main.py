@@ -2107,121 +2107,42 @@ REGLAS:
         return []
 
 
-def detectar_productos_en_respuesta(respuesta, productos_encontrados):
+def agregar_precios_reales(respuesta, productos_encontrados):
     """
-    Detecta qué productos de la lista fueron mencionados en la respuesta.
-    Usa lista de palabras a ignorar para evitar falsos positivos.
+    Inyecta precios de TODOS los productos encontrados.
+    NO depende de lo que GPT haya mencionado.
+    Python controla 100% los precios.
     """
-    if not productos_encontrados or not respuesta:
-        return []
-
-    respuesta_lower = respuesta.lower()
-    productos_mencionados = []
-
-    # Palabras genéricas a IGNORAR en el matcheo
-    palabras_ignorar = {
-        'agua', 'caja', 'conexion', 'conexión', 'cable', 'fuente',
-        'blanco', 'negro', 'plastico', 'plástico', 'plastica',
-        'plástica', 'metalico', 'metálico', 'metalica', 'metálica',
-        'interior', 'exterior', 'prueba', 'para', 'con', 'sin',
-        'modelo', 'tipo', 'serie', 'version', 'versión', 'tapa',
-        'cctv', 'seguridad', 'analogica', 'analógica', 'analogico',
-        'analógico', 'digital', 'inalambrico', 'inalámbrico',
-        'inalambrica', 'inalámbrica', 'wifi', 'ethernet'
-    }
-
-    # Nombres de líneas/familias de productos (matcheo especial)
-    lineas_producto = {
-        'ax pro': ['ax', 'pro', 'axpro'],
-        'colorvu': ['colorvu', 'color', 'vu'],
-        'acusense': ['acusense'],
-        'turbo hd': ['turbo', 'hd'],
-    }
-
-    for prod in productos_encontrados:
-        nombre = prod.get('nombre', prod.get('name', ''))
-        codigo = prod.get('codigo', prod.get('sku', ''))
-        marca = prod.get('marca', '')
-
-        nombre_lower = nombre.lower()
-        palabras_nombre = nombre_lower.split()
-
-        mencionado = False
-
-        # 1. Coincidencia por código exacto
-        if codigo and len(codigo) > 4:
-            if codigo.lower() in respuesta_lower:
-                mencionado = True
-
-        # 2. Coincidencia por línea de producto (AX PRO, etc)
-        if not mencionado:
-            for linea, variantes in lineas_producto.items():
-                if linea in nombre_lower or any(v in nombre_lower for v in variantes):
-                    if any(v in respuesta_lower for v in variantes):
-                        mencionado = True
-                        break
-
-        # 3. Coincidencia por nombre (palabras válidas)
-        if not mencionado and len(palabras_nombre) >= 2:
-            palabras_validas = [
-                p for p in palabras_nombre
-                if len(p) > 3 and p not in palabras_ignorar
-            ]
-            if palabras_validas:
-                coincidencias = sum(
-                    1 for p in palabras_validas
-                    if p in respuesta_lower
-                )
-                # Exigir al menos 2 coincidencias O 60% de palabras válidas
-                umbral = max(2, int(len(palabras_validas) * 0.6))
-                if coincidencias >= umbral:
-                    mencionado = True
-
-        # 4. Coincidencia por marca + tipo específico
-        if not mencionado and marca:
-            marca_lower = marca.lower()
-            tipos_especificos = ['domo', 'bullet', 'ptz', 'turret',
-                                'dvr', 'nvr', 'kit', 'hub', 'panel']
-            for tipo in tipos_especificos:
-                if (marca_lower in respuesta_lower and
-                    tipo in respuesta_lower and
-                    tipo in nombre_lower):
-                    mencionado = True
-                    break
-
-        if mencionado and prod not in productos_mencionados:
-            productos_mencionados.append(prod)
-
-    return productos_mencionados
-
-
-def agregar_precios_reales(respuesta, productos_mencionados):
-    """
-    Agrega bloque de precios reales al final de la respuesta.
-    Python controla 100% los precios, GPT nunca los escribe.
-    """
-    if not productos_mencionados:
+    if not productos_encontrados or len(productos_encontrados) == 0:
         return respuesta
 
-    # Construir bloque de precios
+    # Ordenar: productos CON stock primero, luego por cantidad de stock
+    productos_ordenados = sorted(
+        productos_encontrados,
+        key=lambda p: (p.get('stock', 0) > 0, p.get('stock', 0)),
+        reverse=True
+    )
+
+    # Tomar máximo 5 productos
+    productos_a_mostrar = productos_ordenados[:5]
+
     lineas_precio = []
-    for prod in productos_mencionados[:3]:  # Máximo 3 productos
-        nombre = prod.get('nombre', prod.get('name', ''))
-        precio = prod.get('precio', prod.get('price', 0))
-        iva = prod.get('iva', 21)
+    for prod in productos_a_mostrar:
+        nombre = prod.get('name', prod.get('nombre', 'Producto'))
+        precio = prod.get('price', prod.get('precio', 0))
         stock = prod.get('stock', prod.get('cantidad', 0))
 
-        # Nombre corto (máx 40 chars)
-        nombre_corto = nombre[:40] + '...' if len(nombre) > 40 else nombre
+        # Acortar nombre si es muy largo
+        nombre_corto = nombre[:45] + '...' if len(nombre) > 45 else nombre
 
-        # Formato: nombre + precio
         if stock > 0:
             lineas_precio.append(f"💰 {nombre_corto}: USD {precio} + IVA")
         else:
             lineas_precio.append(f"💰 {nombre_corto}: USD {precio} + IVA (sin stock)")
 
+    # Agregar bloque de precios al final
     if lineas_precio:
-        bloque_precios = "\n" + "\n".join(lineas_precio)
+        bloque_precios = "\n\n" + "\n".join(lineas_precio)
         return respuesta.strip() + bloque_precios
 
     return respuesta
@@ -2406,26 +2327,37 @@ Esta presentación es UNA SOLA VEZ."""
 
 {instruccion_saludo}
 
-=== REGLA DE PRECIOS ===
-Podés hablar de productos normalmente, pero NO escribas el precio vos.
-El sistema agrega automáticamente los precios al final del mensaje.
-Cuando el cliente pregunte por precio, respondé sobre el producto
-y el sistema mostrará el precio real.
+REGLA DE PRECIOS - CRÍTICO:
+- TU TRABAJO: Asesorar técnicamente, recomendar, comparar productos
+- TRABAJO DE PYTHON: Mostrar TODOS los precios automáticamente
+- VOS NUNCA ponés precios, ni USD, ni cifras, ni nada
+- Ejemplos CORRECTOS (sin precio):
+  * "El Kit Hikvision 4 cámaras incluye NVR y disco."
+  * "Te recomiendo el DVR de 8 canales."
+  * "Ese está sin stock, pero el Hikvision tiene specs similares."
+- Ejemplos INCORRECTOS (nunca hagas esto):
+  * "El kit sale USD 450 + IVA" ❌
+  * "Está a USD 180" ❌
+  * "Cuesta $X" ❌
 
-CORRECTO: "El AX Pro es excelente para locales comerciales."
-INCORRECTO: "El AX Pro sale USD 85" ← NO escribir números
+COMPORTAMIENTO INTELIGENTE:
+1. SIN STOCK → Mencionar alternativa por nombre/marca:
+   "Ese no tenemos, pero el DVR Hikvision 8CH tiene specs similares. ¿Te sirve?"
+   (Python agregará TODOS los precios al final)
 
-=== OTRAS REGLAS ===
-- Si el contexto dice "NO hay stock suficiente", SIEMPRE mencionalo
-- Máximo 2-3 líneas cortas
-- Sin URLs ni links
-- Profesional y cordial
-- Terminar preguntando si necesita algo más (variar la frase)
+2. PREGUNTA TÉCNICA → Responder con conocimiento:
+   "El DVR de 8 canales graba hasta 4 cámaras 4K o 8 cámaras 1080p. ¿Algo más?"
 
-CONOCIMIENTO TÉCNICO:
-- CÁMARAS: 2MP=1080p, 4MP=2K, 8MP=4K. Bullet=exterior, Domo=interior.
-- DVR/NVR: DVR=analógicas, NVR=IP. 1TB≈7 días con 4 cámaras.
-- ALARMAS: Ajax=inalámbrica premium, DSC=cableada confiable.
+3. COMPARACIÓN → Comparar sin precios:
+   "El Hikvision es premium, el Dahua es similar pero más económico. ¿Cuál preferís?"
+
+4. COMPLEMENTOS → Sugerir accesorios por nombre:
+   "Para esas cámaras te recomiendo fuente de 12V y baluns. ¿Los agregamos?"
+
+RESUMEN:
+- Vos: Asesorás, recomendás, comparás (SIN precios)
+- Python: Muestra TODOS los precios automáticamente
+- Usuario: Ve tu respuesta + precios completos abajo
 
 {info_pago}
 {f"MARCAS PREFERIDAS: {', '.join(marcas_cliente)}" if marcas_cliente else ""}
@@ -2453,12 +2385,10 @@ Historial: {historial_texto if historial_texto else 'Primera conversación'}
         respuesta_texto = respuesta.choices[0].message.content
 
         # PASO CRÍTICO: Python agrega precios reales
+        # Inyección garantizada - SIEMPRE muestra precios si hay productos
         if productos_encontrados and len(productos_encontrados) > 0:
-            productos_mencionados = detectar_productos_en_respuesta(
-                respuesta_texto, productos_encontrados
-            )
             respuesta_texto = agregar_precios_reales(
-                respuesta_texto, productos_mencionados
+                respuesta_texto, productos_encontrados
             )
 
         return respuesta_texto
